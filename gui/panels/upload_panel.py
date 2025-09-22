@@ -41,20 +41,30 @@ class UploadPanel(QWidget):
         radio_layout.addWidget(self.interpolated_radio)
         radio_layout.addWidget(self.none_filled_radio)
 
+        self.file_log_layout = QHBoxLayout()
+
+        self.file_layout = QVBoxLayout()
+        self.file_layout.addWidget(QLabel("Loaded files:"))
+
+        self.file_list = QListWidget()
+        self.file_layout.addWidget(self.file_list)
+
+        self.file_log_layout.addLayout(self.file_layout)
+
+        self.log_layout = QVBoxLayout()
+        self.log_layout.addWidget(QLabel("Logs:"))
+
         self.status_log = QTextEdit()
         self.status_log.setReadOnly(True)
         self.status_log.setPlaceholderText("Logs will appear here...")
+        self.log_layout.addWidget(self.status_log)
 
-        self.file_list = QListWidget()
+        self.file_log_layout.addLayout(self.log_layout)
 
-        layout.addWidget(QLabel("Loading data"))
         layout.addWidget(self.csv_button)
         layout.addWidget(self.json_button)
         layout.addLayout(radio_layout)
-        layout.addWidget(QLabel("Loaded files:"))
-        layout.addWidget(self.file_list)
-        layout.addWidget(QLabel("Logs:"))
-        layout.addWidget(self.status_log)
+        layout.addLayout(self.file_log_layout)
 
         self.setLayout(layout)
 

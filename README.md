@@ -89,7 +89,8 @@ After conversion of JSON file you still need to load them as csv files.
 
 Choose a csv file that contains required data columns - header.timestamp_epoch, data.telemetry.acc_data.\*,
 data.telemetry.quaternion.\*
-Simply click compute button and wait for the results - computed apogee, max speed and plots. Currently, the animation for
+Simply click compute button and wait for the results - computed apogee, max speed and plots. Currently, the animation
+for
 rotation is not working so its disabled and waiting for fix.
 If you want to save the computed data remember to click the save to file button.
 
@@ -111,6 +112,7 @@ Possible operations are:
 - **flip_sign** - take content of each selected columns and change the sign + into -, </br> - into +
 - **sort** - select only one column and sort the whole data by that specific column. In parameters specify if it should
   be
+- **rename** - select only one column and rename it
   ascending or descending by writing 'ascending=True/False'
 - **drop** - when selecting drop operation, three radio buttons will appear:
     - **Drop by columns** - the selected columns will be deleted
@@ -140,12 +142,25 @@ Possible filters are:
 
 ### Plotting
 
+#### General info
+
 Here you can plot data that you loaded and transformed in the previous panel. It is possible to have two separately
-scaled Y axes and combining a plot from two different databases. The X axis can be changed, however it is set by default
-to timestamp_epoch, on top of that it can be automatically converted to seconds and milliseconds, as well shift the
+scaled Y axes and combining a plot from two different databases. The X axis can be changed, by default the X axis is
+'header.timestamp_epoch' but it can be changed for each data column individually. </br>
+On top of that it can be automatically
+converted to seconds and milliseconds, as well shift the
 graph in time by providing the offset in milliseconds in the specified box. Negative values shift the graph to the left
 and positive to the right.
 On the bottom you can enter horizontal and vertical dotted lines.
+
+#### Synchronization
+
+The provided button will try to synchronize timestamps of two databases. </br>
+Synchronization is tuned for static engine tests, it will look for the highest values of selected columns, and compare
+their timestamps.
+After that it will synch db2 to db1 and provide an offset in milliseconds to copy and paste into offset window resulting
+in shifting the whole graph so the ignition happens at 0 seconds. The synchronization will overwrite the data, but as
+always it needs to be saved to be preserved.
 
 ### Deactivating the Virtual Environment
 

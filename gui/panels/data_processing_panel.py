@@ -20,6 +20,7 @@ class DataProcessingPanel(QWidget):
             "drop": "Drop the data, based on a selected condition",
             "flip_sign": "Take content of each selected columns and change the sign + into -,- into + ",
             "normalize": "Take content of each selected column and perform a min-max value normalization of them",
+            "offset": "Take content of each selected column and offset them by a value provided in parameters box",
             "rename": "Rename a selected column",
             "scale": "Take content of each selected column and scale them by a factor provided in parameters box",
             "sort": "Select only one column and sort the whole data by that specific column.In parameters specify if it should be ascending or descending by writing 'ascending=True/False'",
@@ -32,7 +33,6 @@ class DataProcessingPanel(QWidget):
         }
 
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("Data processing"))
 
         self.file_selector = QComboBox()
         self.file_selector.currentIndexChanged.connect(self.update_columns)
@@ -57,7 +57,7 @@ class DataProcessingPanel(QWidget):
         # Operations
         self.operation_box = QGroupBox("Operations")
         self.operation_selector = QComboBox()
-        self.operation_selector.addItems(["absolute", "drop", "flip_sign", "normalize", "rename", "scale", "sort"])
+        self.operation_selector.addItems(["absolute", "drop", "flip_sign", "normalize","offset", "rename", "scale", "sort"])
         self.operation_selector.currentTextChanged.connect(self.toggle_drop_mode)
         self.operation_selector.currentTextChanged.connect(self.update_placeholder_operations)
         self.operation_selector.currentTextChanged.connect(self.update_operation_help)
@@ -145,12 +145,13 @@ class DataProcessingPanel(QWidget):
 
     def update_placeholder_operations(self, operation):
         placeholders = {
-            "normalize": "factor=x",
+            "normalize": "",
             "scale": "100",
+            "offset": "10",
             "flip_sign": "",
             "absolute": "",
             "sort": "ascending=True/False",
-            "drop": "e.g. 100,200 or row['column'] > 0",
+            "drop": "e.g. 100,200 or row['column_name'] > 0",
             "rename": "new_name"
         }
         match operation:
@@ -250,12 +251,15 @@ class DataProcessingPanel(QWidget):
                     case "scale":
                         processor.scale_columns(columns, float(param))
                         success = True
+                    case "offset":
+                        processor.offset(columns, float(param))
+                        success = True
                     case "flip_sign":
                         processor.flip_column_sign(columns)
                         success = True
                     case "rename":
-                        if len(columns) <= 1:
-                            processor.rename_column(columns, str(param))
+                        if len(columns) == 1:
+                            processor.rename_column(columns[0], str(param))
                             QTimer.singleShot(200, self.update_columns)
                             success = True
                         else:
@@ -264,8 +268,11 @@ class DataProcessingPanel(QWidget):
                         processor.absolute(columns)
                         success = True
                     case "sort":
-                        processor.sort_data(columns[0], ascending=True)
-                        success = True
+                        if len(columns)<=0:
+                            processor.sort_data(columns[0], ascending=True)
+                            success = True
+                        else:
+                            self.log("You may sort by only one column", "ERROR")
                     case "drop":
                         if self.drop_columns_radio.isChecked():
                             processor.drop_data(columns=columns)
@@ -334,9 +341,7 @@ class DataProcessingPanel(QWidget):
             save_path, _ = QFileDialog.getSaveFileName(self, "Save as", filter="CSV Files (*.csv)")
             if save_path:
                 try:
-                    def task():
-                        processor.save_data(save_path)
-                        self.log(f"Data saved to: {save_path}", "INFO")
-                        show_processing_dialog(self, self.threadpool, Worker(task))
+                    processor.save_data(save_path)
+                    self.log(f"Data saved to: {save_path}", "INFO")
                 except Exception as e:
                     self.log(f"Error during saving data: {e}", "ERROR")

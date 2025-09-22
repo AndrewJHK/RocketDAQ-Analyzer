@@ -20,7 +20,7 @@ class FlightPlotPanel(QWidget):
 
         layout = QVBoxLayout()
 
-        layout.addWidget(QLabel("Flight data analysis"))
+        layout.addWidget(QLabel("Choose file: "))
 
         self.file_selector = QComboBox()
         self.file_selector.currentTextChanged.connect(self._update_selection)
@@ -165,3 +165,12 @@ class FlightPlotPanel(QWidget):
                 self.log(f"Data saved to: {save_path}", "INFO")
 
             show_processing_dialog(self, self.threadpool, Worker(task))
+
+    def remove_dataframe(self, file_path):
+        if file_path in self.dataframes:
+            del self.dataframes[file_path]
+        if file_path in self.processors:
+            del self.processors[file_path]
+        index = self.file_selector.findText(file_path)
+        if index >= 0:
+            self.file_selector.removeItem(index)

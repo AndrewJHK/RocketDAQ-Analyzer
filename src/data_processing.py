@@ -142,6 +142,17 @@ class DataProcessor:
         return index
 
     @sync_with_wrapper
+    def offset(self, columns, offset):
+        """
+        Offset data  by a given float, positive or negative
+        """
+        if isinstance(columns, str):
+            columns = [columns]
+
+        for column in columns:
+            self.df[column] += offset
+
+    @sync_with_wrapper
     def flip_column_sign(self, columns):
         """
         Flips the sign of all values in the specified column(s).
@@ -160,7 +171,7 @@ class DataProcessor:
 
     @sync_with_wrapper
     def rename_column(self, columns, new_name):
-        self.df = self.df.rename(columns={columns[0]: new_name})
+        self.df = self.df.rename(columns={columns: new_name})
 
     def interpolate_index(self):
         df_pd = self.df_wrapper.get_raw_pandas()

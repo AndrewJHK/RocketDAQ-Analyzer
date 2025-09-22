@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-    QScrollArea, QStackedWidget
+    QScrollArea, QStackedWidget, QLabel,
 )
 from gui.panels.upload_panel import UploadPanel
 from gui.panels.data_processing_panel import DataProcessingPanel
@@ -8,12 +8,12 @@ from gui.panels.flight_plot_panel import FlightPlotPanel
 from gui.panels.plotting_panel import PlottingPanel
 from src.data_processing import DataFrameWrapper
 from src.processing_utils import logger
+import os
+
 
 class FileWidget(QWidget):
     def __init__(self, file_path, delete_callback):
         super().__init__()
-        from PyQt6.QtWidgets import QLabel, QPushButton, QHBoxLayout
-        import os
 
         self.file_path = file_path
         self.delete_callback = delete_callback
@@ -134,5 +134,3 @@ class PostProcessingApp(QWidget):
         self.flight_panel.remove_dataframe(file_path)
         self.processing_panel.remove_dataframe(file_path)
         self.plotting_panel.remove_dataframe(file_path)
-
-
