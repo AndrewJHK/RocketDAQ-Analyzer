@@ -2,12 +2,11 @@ from PyQt6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
     QScrollArea, QStackedWidget, QLabel,
 )
-from gui.panels.upload_panel import UploadPanel
+from gui.panels.data_acquisition_panel import UploadPanel
 from gui.panels.data_processing_panel import DataProcessingPanel
 from gui.panels.flight_plot_panel import FlightPlotPanel
 from gui.panels.plotting_panel import PlottingPanel
 from src.data_processing import DataFrameWrapper
-from src.processing_utils import logger
 import os
 
 

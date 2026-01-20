@@ -1,9 +1,10 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QComboBox, QHBoxLayout,
     QPushButton, QTextEdit, QCheckBox, QLineEdit, QFormLayout,
-    QGroupBox, QFileDialog, QScrollArea, QListWidget, QRadioButton
+    QGroupBox, QFileDialog, QScrollArea, QListWidget, QRadioButton, QSpacerItem, QSizePolicy
 )
 from PyQt6.QtCore import QThreadPool, QTimer
+from src.plotter import Plotter
 from src.data_processing import DataProcessor
 from src.processing_utils import logger, Worker, show_processing_dialog
 import re
@@ -17,8 +18,10 @@ class DataProcessingPanel(QWidget):
         self.threadpool = QThreadPool()
         self.help_map = {
             "absolute": "Replace all data with absolute values",
+            "adaptive_kalman": "Perform a adaptive kalman filter with specified parameters",
             "drop": "Drop the data, based on a selected condition",
             "flip_sign": "Take content of each selected columns and change the sign + into -,- into + ",
+            "low-pass": "Apply a Butterworth low-pass filter",
             "normalize": "Take content of each selected column and perform a min-max value normalization of them",
             "offset": "Take content of each selected column and offset them by a value provided in parameters box",
             "rename": "Rename a selected column",
@@ -29,7 +32,7 @@ class DataProcessingPanel(QWidget):
             "rolling_mean": "Perform a rolling mean filter with a specified windows size in parameters",
             "rolling_median": "Perform a rolling median filter with a specified windows size in parameters",
             "threshold": "Replace all the values that exceed a provided value with that value",
-            "wavelet_transform": " Perform a wavelet decomposition and recomposition with specified parameters"
+            "wavelet_transform": "Perform a wavelet decomposition and recomposition with specified parameters"
         }
 
         layout = QVBoxLayout()
@@ -57,14 +60,14 @@ class DataProcessingPanel(QWidget):
         # Operations
         self.operation_box = QGroupBox("Operations")
         self.operation_selector = QComboBox()
-        self.operation_selector.addItems(["absolute", "drop", "flip_sign", "normalize","offset", "rename", "scale", "sort"])
+        self.operation_selector.addItems(
+            ["absolute", "drop", "flip_sign", "normalize", "offset", "rename", "scale", "sort"])
         self.operation_selector.currentTextChanged.connect(self.toggle_drop_mode)
         self.operation_selector.currentTextChanged.connect(self.update_placeholder_operations)
         self.operation_selector.currentTextChanged.connect(self.update_operation_help)
         self.operation_param = QLineEdit()
         self.operation_param.setEnabled(False)
-        self.operation_help = QLabel(
-            "Replace all data with absolute values")
+        self.operation_help = QLabel("Replace all data with absolute values")
         self.operation_help.setWordWrap(True)
         self.apply_op_button = QPushButton("Apply operation")
         self.apply_op_button.clicked.connect(self.apply_operation)
@@ -92,14 +95,14 @@ class DataProcessingPanel(QWidget):
         # Filters
         self.filter_box = QGroupBox("Filters")
         self.filter_selector = QComboBox()
-        self.filter_selector.addItems([
-            "remove_negatives", "remove_positives", "rolling_mean", "rolling_median", "threshold",
-            "wavelet_transform"])
+        self.filter_selector.addItems(
+            ["low-pass", "remove_negatives", "remove_positives", "rolling_mean", "rolling_median",
+             "threshold", "wavelet_transform"])
         self.filter_selector.currentTextChanged.connect(self.update_placeholder_filters)
         self.filter_selector.currentTextChanged.connect(self.update_filter_help)
-        self.filter_param = QLineEdit()
-        self.filter_param.setEnabled(False)
-        self.filter_help = QLabel("Replace all negative values with 0")
+        self.filter_param = QLineEdit("order=4,cutoff=100,fs=1000,zero_phase=True")
+        self.filter_param.setEnabled(True)
+        self.filter_help = QLabel("Apply a Butterworth low-pass filter")
         self.filter_help.setWordWrap(True)
         self.add_filter_button = QPushButton("Add filter")
         self.add_filter_button.clicked.connect(self.add_filter)
@@ -114,26 +117,94 @@ class DataProcessingPanel(QWidget):
 
         layout.addLayout(side_layout)
 
+        bottom_split = QHBoxLayout()
+
+        left_col = QVBoxLayout()
+
         # Filter queue
         self.queue_list = QListWidget()
         queue_box = QGroupBox("Filter queue")
         queue_layout = QVBoxLayout()
         queue_layout.addWidget(self.queue_list)
         queue_box.setLayout(queue_layout)
-        layout.addWidget(queue_box)
+        left_col.addWidget(queue_box)
 
         self.apply_filters_button = QPushButton("Apply filter")
         self.apply_filters_button.clicked.connect(self.apply_filters)
-        layout.addWidget(self.apply_filters_button)
+        left_col.addWidget(self.apply_filters_button)
 
         self.save_button = QPushButton("Save to file")
         self.save_button.clicked.connect(self.save_to_file)
-        layout.addWidget(self.save_button)
+        left_col.addWidget(self.save_button)
 
+        # Logs
         self.status_log = QTextEdit()
         self.status_log.setReadOnly(True)
-        layout.addWidget(QLabel("Logs:"))
-        layout.addWidget(self.status_log)
+        logs_box = QGroupBox("Logs")
+        logs_layout = QVBoxLayout()
+        logs_layout.addWidget(self.status_log)
+        logs_box.setLayout(logs_layout)
+        left_col.addWidget(logs_box)
+
+        left_col.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+
+        right_col = QVBoxLayout()
+        freq_box = QGroupBox("Frequency analysis")
+        freq_form = QFormLayout()
+
+        # FFT params
+        self.fft_fs = QLineEdit()  # Hz (empty => auto)
+        self.fft_nfft = QLineEdit()  # fe. 4096
+        self.fft_window = QComboBox()
+        self.fft_window.addItems(["hann", "hamming", "blackman", "boxcar"])
+        self.fft_detrend = QCheckBox("Detrend")
+        self.fft_db = QCheckBox("dB scale");
+        self.fft_db.setChecked(True)
+        self.fft_maxfreq = QLineEdit()  # Hz (empty => full spectrum)
+        self.plot_fft_button = QPushButton("Plot periodogram")
+        self.plot_fft_button.clicked.connect(self.plot_fft)
+
+        self.spec_fs = QLineEdit()  # Hz (empty => auto)
+        self.spec_nperseg = QLineEdit("512")
+        self.spec_noverlap = QLineEdit("256")  # empty => 50%
+        self.spec_window = QComboBox()
+        self.spec_window.addItems(["hann", "hamming", "blackman", "boxcar"])
+        self.spec_mode = QComboBox()
+        self.spec_mode.addItems(["psd", "magnitude", "complex", "angle", "phase"])
+        self.spec_db = QCheckBox("dB scale")
+        self.spec_db.setChecked(True)
+        self.spec_cmap = QLineEdit("viridis")
+        self.plot_spec_button = QPushButton("Plot Spectrogram")
+        self.plot_spec_button.clicked.connect(self.plot_spectrogram)
+
+        freq_form.addRow(QLabel("— Periodogram — "))
+        freq_form.addRow("Fs [Hz]", self.fft_fs)
+        freq_form.addRow("Samples for FFT", self.fft_nfft)
+        freq_form.addRow("Window", self.fft_window)
+        freq_form.addRow(self.fft_detrend)
+        freq_form.addRow(self.fft_db)
+        freq_form.addRow("Max freq [Hz]", self.fft_maxfreq)
+        freq_form.addRow(self.plot_fft_button)
+
+        freq_form.addRow(QLabel("— Spectrogram —"))
+        freq_form.addRow("Fs [Hz]", self.spec_fs)
+        freq_form.addRow("Number of samples", self.spec_nperseg)
+        freq_form.addRow("Overlap size", self.spec_noverlap)
+        freq_form.addRow("Window", self.spec_window)
+        freq_form.addRow("Mode", self.spec_mode)
+        freq_form.addRow(self.spec_db)
+        freq_form.addRow("Colormap", self.spec_cmap)
+        freq_form.addRow(self.plot_spec_button)
+
+        freq_box.setLayout(freq_form)
+        right_col.addWidget(freq_box)
+        right_col.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+
+        # Combine Columns
+        bottom_split.addLayout(left_col, 1)
+        bottom_split.addLayout(right_col, 1)
+
+        layout.addLayout(bottom_split)
 
         self.setLayout(layout)
 
@@ -164,6 +235,8 @@ class DataProcessingPanel(QWidget):
 
     def update_placeholder_filters(self, operation):
         placeholders = {
+            "adaptive_kalman": "model=constant,fs=10000,R=5e-3,Q0=1e-5,tau=3.5,q_up=8.0,q_down=0.9",
+            "low-pass": "order=4,cutoff=100,fs=1000,zero_phase=True",
             "remove_negatives": "",
             "remove_positives": "",
             "rolling_mean": "window=2137",
@@ -187,7 +260,7 @@ class DataProcessingPanel(QWidget):
 
     def add_dataframe(self, file_path, wrapper):
         self.dataframes[file_path] = wrapper
-        self.processors[file_path] = DataProcessor(wrapper)
+        self.processors[file_path] = DataProcessor(wrapper, log_fn=self.log)
         self.file_selector.addItem(file_path)
 
     def remove_dataframe(self, file_path):
@@ -268,7 +341,7 @@ class DataProcessingPanel(QWidget):
                         processor.absolute(columns)
                         success = True
                     case "sort":
-                        if len(columns)<=0:
+                        if len(columns) == 1:
                             processor.sort_data(columns[0], ascending=True)
                             success = True
                         else:
@@ -305,17 +378,26 @@ class DataProcessingPanel(QWidget):
         processor = self.processors.get(file_path)
 
         try:
-            params = dict(p.split('=') for p in raw_params.split(',') if '=' in p)
-            number_pattern = re.compile(r"^-?\d+(\.\d+)?$")
-            for k in params:
-                value = params[k]
-                if number_pattern.fullmatch(value):
-                    if k == "level":
-                        params[k] = int(value)
-                    else:
-                        params[k] = float(value)
-                else:
-                    params[k] = value
+            raw = [p for p in raw_params.split(',') if '=' in p]
+            pairs = [tuple(map(str.strip, p.split('=', 1))) for p in raw]
+            params = {}
+
+            for k, v in pairs:
+                if v.lower() in ("true", "false"):
+                    params[k] = (v.lower() == "true")
+                    continue
+                if k == "order":
+                    try:
+                        params[k] = int(float(v))
+                        continue
+                    except ValueError:
+                        pass
+                try:
+                    params[k] = float(v)
+                    continue
+                except ValueError:
+                    pass
+                params[k] = v
             processor.add_filter(columns, filter_type, **params)
             self.queue_list.addItem(f"{filter_type} on {columns} with {params}")
             self.log(f"Added filter {filter_type} for {columns}", "INFO")
@@ -328,11 +410,109 @@ class DataProcessingPanel(QWidget):
                 file_path = self.file_selector.currentText()
                 processor = self.processors.get(file_path)
                 processor.queue_filters()
+                self.queue_list.clear()
+                QTimer.singleShot(200, self.update_columns)
                 self.log("Applied all queued filters", "INFO")
 
             show_processing_dialog(self, self.threadpool, Worker(task))
         except Exception as e:
             self.log(f"Error during filter aplication:{e}", "ERROR")
+
+    @staticmethod
+    def _parse_float(line_edit: QLineEdit):
+        txt = line_edit.text().strip()
+        return float(txt) if txt else None
+
+    @staticmethod
+    def _parse_int(line_edit: QLineEdit):
+        txt = line_edit.text().strip()
+        return int(txt) if txt else None
+
+    def _current_df_key_and_cols(self):
+        file_path = self.file_selector.currentText()
+        cols = self.get_selected_columns()
+        if not file_path or not cols:
+            self.log("Choose file and at least one column.", "INFO")
+            return None, None
+        return file_path, cols
+
+    def plot_fft(self):
+        file_path, cols = self._current_df_key_and_cols()
+        if not file_path:
+            return
+        channel = cols[0]
+
+        fs = self._parse_float(self.fft_fs)
+        nfft = self._parse_int(self.fft_nfft)
+        window = self.fft_window.currentText()
+        detrend = self.fft_detrend.isChecked()
+        db_scale = self.fft_db.isChecked()
+        max_freq = self._parse_float(self.fft_maxfreq)
+
+        try:
+            df = self.dataframes[file_path].get_dataframe()
+            time_candidates = ["header.timestamp_epoch", "header.timestamp", "time"]
+            x_column = next((c for c in df.columns if c.lower() in time_candidates), None)
+            cfg = {
+                "plot_settings": {"title": f"FFT - {channel}"},
+                "databases": {file_path: {"channels": {channel: {"label": channel}}}}
+            }
+            plotter = Plotter(cfg, {file_path: self.dataframes[file_path]})
+            plotter.plot_fft(
+                db_key=file_path,
+                channel=channel,
+                fs=fs,
+                nfft=nfft,
+                window=window,
+                detrend=detrend,
+                db_scale=db_scale,
+                max_freq=max_freq,
+                x_column=x_column,
+                title=f"FFT - {channel}",
+            )
+            self.log(f"Plotted FFT for {channel}", "INFO")
+        except Exception as e:
+            self.log(f"Error plotting FFT: {e}", "ERROR")
+
+    def plot_spectrogram(self):
+        file_path, cols = self._current_df_key_and_cols()
+        if not file_path:
+            return
+        channel = cols[0]
+
+        fs = self._parse_float(self.spec_fs)
+        nperseg = self._parse_int(self.spec_nperseg) or 512
+        noverlap = self._parse_int(self.spec_noverlap)  # None => 50%
+        window = self.spec_window.currentText()
+        mode = self.spec_mode.currentText()
+        db_scale = self.spec_db.isChecked()
+        cmap = self.spec_cmap.text().strip() or "viridis"
+
+        try:
+            df = self.dataframes[file_path].get_dataframe()
+            time_candidates = ["header.timestamp_epoch", "header.timestamp", "time"]
+            x_column = next((c for c in df.columns if c.lower() in time_candidates), None)
+            cfg = {
+                "plot_settings": {"title": f"Spectrogram - {channel}"},
+                "databases": {file_path: {"channels": {channel: {"label": channel}}}}
+            }
+            plotter = Plotter(cfg, {file_path: self.dataframes[file_path]})
+            plotter.plot_spectrogram(
+                db_key=file_path,
+                channel=channel,
+                fs=fs,
+                nperseg=nperseg,
+                noverlap=noverlap,
+                window=window,
+                mode=mode,
+                db_scale=db_scale,
+                cmap=cmap,
+                x_column=x_column,
+                title=f"Spectrogram - {channel}",
+            )
+            self.log(f"Plotted spectrogram for {channel}", "INFO")
+        except Exception as e:
+            self.log(f"Error plotting spectrogram: {e}", "ERROR")
 
     def save_to_file(self):
         file_path = self.file_selector.currentText()

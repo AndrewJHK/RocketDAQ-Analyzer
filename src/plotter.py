@@ -1,9 +1,30 @@
 import matplotlib.pyplot as plot
 from matplotlib.animation import FuncAnimation
+from matplotlib import rc
 import os
 import matplotlib.ticker as ticker
 import numpy as np
+from scipy import signal
 from scipy.spatial.transform import Rotation
+import matplotlib as mpl
+
+mpl.rcParams["text.usetex"] = True
+mpl.rcParams["text.latex.preamble"] = r"""
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{polski}
+"""
+mpl.rcParams.update({
+    "axes.titlesize": 14,
+    "axes.labelsize": 14,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 13,
+})
+
+
+rc('text', usetex=True)
 
 
 class Plotter:
@@ -267,6 +288,111 @@ class Plotter:
             color="b",
             normalize=True,
         )
+
+    @staticmethod
+    def _compute_fs(x):
+        """
+        Tries to make out the fs parameter  out of the x-axis
+        :param x:
+        :return:
+        """
+        if x is None or len(x) < 3:
+            return 1.0
+        dx = np.diff(x)
+        dx = dx[np.isfinite(dx)]
+        if dx.size == 0:
+            return 1.0
+        med = float(np.median(dx))
+        if med <= 0:
+            return 1.0
+        if med > 5:
+            med = med / 1000.0
+        return 1.0 / med
+
+    def _series_from_cfg(self, db_key, channel, x_column=None):
+        df = self.dataframes[db_key].get_dataframe()
+        y = df[channel].compute().to_numpy()
+        x = None
+        if x_column and x_column in df.columns:
+            x = df[x_column].compute().to_numpy()
+        return x, y
+
+    def plot_fft(self, db_key, channel, fs=None, nfft=None, window="hann", detrend=False, db_scale=True, max_freq=None,
+                 x_column=None, title=None):
+        x, y = self._series_from_cfg(db_key, channel, x_column)
+
+        if fs is None:
+            fs = self._compute_fs(x)
+        if detrend:
+            y = signal.detrend(y)
+        if window:
+            try:
+                win = signal.get_window(window, len(y))
+                y *= win
+            except Exception:
+                pass
+
+        n = len(y) if nfft is None else int(nfft)
+        y_fft = np.fft.rfft(y, n=n)
+        f = np.fft.rfftfreq(n, d=1.0 / fs)
+        Pxx = (1 / (fs * n)) * np.abs(y_fft) ** 2
+
+        if db_scale:
+            eps = 1e-12
+            Pxx = 10 * np.log10(Pxx + eps)
+
+        if max_freq is not None:
+            mask = f <= float(max_freq)
+            f = f[mask]
+            Pxx = Pxx[mask]
+
+        fig, ax = plot.subplots(figsize=(10, 6))
+        ax.plot(f, Pxx)
+        ax.set_xlabel("Frequency [Hz]")
+        ax.set_ylabel(
+            r'Power spectral density [$\frac{dB}{Hz}$]' if db_scale else r'Power spectral density [$\frac{V^2}{Hz}$]')
+        ax.grid(True)
+        plot.title(title or f"FFT: {channel}")
+
+        self.save_plot(title or f"FFT_{channel}")
+        plot.show()
+
+    def plot_spectrogram(self, db_key, channel, fs=None, nperseg=256, noverlap=None, window="hann", mode="psd",
+                         db_scale=True, cmap="viridis", x_column=None, title=None):
+        x, y = self._series_from_cfg(db_key, channel, x_column)
+
+        if fs is None:
+            fs = self._compute_fs(x)
+        if fs is None:
+            fs = 1.0
+        if noverlap is None:
+            noverlap = int(0.5 * nperseg)
+
+        f, t, Sxx = signal.spectrogram(
+            y,
+            fs=fs,
+            window=window,
+            nperseg=int(nperseg),
+            noverlap=int(noverlap),
+            mode=mode,
+            detrend=False,
+            scaling="density"
+        )
+
+        if db_scale:
+            Sxx = 10 * np.log10(Sxx + 1e-12)
+
+        fig, ax = plot.subplots(figsize=(10, 6))
+        m = ax.pcolormesh(t, f, Sxx, shading="auto", cmap=cmap)
+        ax.set_ylabel("Frequency [Hz]")
+        ax.set_xlabel("Time [s]")
+        cbar = plot.colorbar(m, ax=ax)
+        cbar.set_label("Power [dB]" if db_scale else ("PSD" if mode == "psd" else "Magnitude"))
+        ax.set_title(title or f"Spectrogram: {channel}")
+        ax.set_ylim(0, f.max())
+
+        self.save_plot(title or f"Spectrogram_{channel}")
+        plot.show()
 
     def save_plot(self, filename):
         path = os.path.join(self.plots_folder_path, f"{filename}.png")

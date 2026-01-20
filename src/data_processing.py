@@ -21,7 +21,8 @@ def sync_with_wrapper(method):
 class DataFrameWrapper:
     def __init__(self, csv_path):
         self.csv_path = csv_path
-        self.df = dd.read_csv(csv_path)
+        self.df = dd.read_csv(csv_path, assume_missing=True)
+        self.df = self.df.set_index("header.counter", sorted=True, drop=False)
 
     def get_dataframe(self):
         return self.df
@@ -33,15 +34,15 @@ class DataFrameWrapper:
         self.df = dataframe
 
     def get_raw_pandas(self):
-        return pd.read_csv(self.csv_path, parse_dates=["header.timestamp_epoch"], index_col="header.counter")
+        return pd.read_csv(self.csv_path, parse_dates=["TIMESTAMP"], index_col="header.counter")
 
 
 class DataProcessor:
-    def __init__(self, df_wrapper):
+    def __init__(self, df_wrapper, log_fn=None):
         """Initializes processor with a DataFrameWrapper instance."""
         self.df_wrapper = df_wrapper
         self.df = df_wrapper.get_dataframe()
-        self.filter_manager = DataFilter()  # Handles filter strategies
+        self.filter_manager = DataFilter(log_fn=log_fn)  # Handles filter strategies
 
     def get_filters(self):
         return self.filter_manager.get_filter_queue()
@@ -280,4 +281,4 @@ class DataProcessor:
 
     def save_data(self, path):
         """Save the processed DataFrame."""
-        dd.to_csv(self.df, path, single_file=True)
+        dd.to_csv(self.df, path, single_file=True, index=False)
