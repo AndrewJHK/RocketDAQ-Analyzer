@@ -1,2 +1,10 @@
-venv
 .idea/
+__pychache__
+__pycache__/
+!**/__pycache__/
+env/
+venv/
+.venv
+app.log
+plots/
+data/
