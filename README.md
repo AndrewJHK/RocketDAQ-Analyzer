@@ -1,10 +1,11 @@
-RocketDAQ Analyzer
----
+# RocketDAQ Analyzer
+
+## Preface
 The developed application constitutes an integral part of the engineering thesis entitled
 “Digital filtering of data from pressure sensors in the rocket engine system.” </br>
 The software was created to support the analysis and post-processing of experimental data 
 acquired during rocket engine test campaigns and serves as a practical implementation of the methods discussed in this work.
----
+
 
 ## Features
 - BSON data retrieval
@@ -14,7 +15,7 @@ acquired during rocket engine test campaigns and serves as a practical implement
 - Plotting of the csv data and saving them as separate files
 - Plotting of the flight telemetry on animated plots
 
----
+
 
 ## Getting Started
 
