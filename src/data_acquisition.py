@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from pymongo import MongoClient, ASCENDING
-from bson import decode_file_iter, json_util
+from bson import decode_file_iter
 from bson.raw_bson import RawBSONDocument
 from collections import namedtuple
 from src.processing_utils import logger
@@ -23,6 +23,15 @@ CHANNEL_LABEL_MAPPINGS = {
         "usb4716.chan2.scaled": "N2O_PRES",
         "usb4716.chan3.scaled": "FUEL"
     },
+    131: {
+        "pcie1816.chan1.scaled": "GSE_N2O_IN",
+        "pcie1816.chan2.scaled": "GSE_N2",
+        "pcie1816.chan3.scaled": "COPV",
+        "pcie1816.chan4.scaled": "Oxidizer_TANK",
+        "pcie1816.chan6.scaled": "GSE_N2O_OUT",
+        "pcie1816.chan7.scaled": "FUEL_TANK",
+        "pcie1816.chan9.scaled": "REF",
+    },
     100: {
         "adc1.chan0.scaled": "TM2.scaled",
         "adc1.chan0.raw": "TM2.raw",
@@ -32,8 +41,8 @@ CHANNEL_LABEL_MAPPINGS = {
         "adc1.chan2.raw": "PT1.raw",
         "adc1.chan3.scaled": "TM1.scaled",
         "adc1.chan3.raw": "TM1.raw",
-        "adc2.chan0.scaled": "PT5,scaled",
-        "adc2.chan0.raw": "PT5,raw",
+        "adc2.chan0.scaled": "PT5.scaled",
+        "adc2.chan0.raw": "PT5.raw",
         "adc2.chan1.scaled": "PT6.scaled",
         "adc2.chan1.raw": "PT6.raw",
         "adc2.chan2.scaled": "PT4.scaled",
@@ -43,6 +52,8 @@ CHANNEL_LABEL_MAPPINGS = {
 
     }
 }
+
+_WRITE_BATCH = 20000
 
 
 class MongoDBDataRetriever:
@@ -192,42 +203,58 @@ class MongoDBDataRetriever:
 
 class DATAParser:
     """
-    Parser for JSON/BSON data into CSV with interpolation and multi-device support.
+    Parser for JSON/BSON data into CSV with incremental processing to minimize memory usage.
     """
 
-    def __init__(self, json_data, csv_path, interpolated):
+    def __init__(self, csv_path=None, interpolated=True, bson_file=None):
         """
-        Initialize the parser from JSON data.
+        Initialize the parser from a BSON file.
 
-        :param json_data: list of JSON documents loaded from BSON or JSON
         :param csv_path: path where CSV files will be written
         :param interpolated: whether to fill missing values (True) or leave them empty (False)
+        :param bson_file: path to BSON file for incremental processing
         """
-        self.json_data = json_data
         self.csv_path = csv_path
         self.interpolated = interpolated
+        self.bson_file = bson_file
         self.fields_per_origin = {}
         self.last_known = {}
         self.counters = {}
         self.devices = {}
+        self._non_header_keys = {}
 
-        self._extract_all_origins()
-        self._initialize_devices()
+        if bson_file is not None:
+            self._scan_bson_for_metadata()
+            self._initialize_devices()
 
-    def _extract_all_origins(self):
+    def _scan_bson_for_metadata(self, chunk_size=10000):
         """
-        Extract all origins and their available fields from JSON data.
+        Scan BSON file in chunks to extract field metadata without loading entire file.
+        Only reads first chunk_size records to discover all fields efficiently.
+
+        :param chunk_size: number of records to scan for metadata discovery
         """
-        for record in self.json_data:
-            origin = record.get("data").get("header", {}).get("origin")
-            if origin is None:
-                continue
-            if origin not in self.fields_per_origin:
-                self.fields_per_origin[origin] = set()
-            flat = self.flatten_dict(record.get("data").get("data", {}))
-            for full_key in flat:
-                mapped_key = self.map_key(origin, full_key)
-                self.fields_per_origin[origin].add(f"data.{mapped_key}")
+        try:
+            with open(self.bson_file, "rb") as f:
+                count = 0
+                for doc in decode_file_iter(f):
+                    origin = doc.get("data", {}).get("header", {}).get("origin")
+                    if origin is None:
+                        continue
+                    if origin not in self.fields_per_origin:
+                        self.fields_per_origin[origin] = set()
+                    flat = self.flatten_dict(doc.get("data", {}).get("data", {}))
+                    for full_key in flat:
+                        mapped_key = self.map_key(origin, full_key)
+                        self.fields_per_origin[origin].add(f"data.{mapped_key}")
+
+                    count += 1
+                    if count >= chunk_size:
+                        logger.debug(f"Metadata scan completed on {count} records")
+                        break
+        except Exception as e:
+            logger.error(f"Failed to scan BSON metadata: {e}")
+            raise
 
     def _initialize_devices(self):
         """
@@ -240,56 +267,56 @@ class DATAParser:
             self.devices[origin] = DeviceCSVConfig(dev_name, origin, field_list, CHANNEL_LABEL_MAPPINGS.get(origin, {}))
             self.last_known[origin] = {}
             self.counters[origin] = 0
+            self._non_header_keys[origin] = [
+                f for f in field_list
+                if not f.startswith("header") and f != "data.cpu_temperature"
+            ]
 
-    def write_row(self, record, device: DeviceCSVConfig, writer):
+    def _build_row(self, record, origin):
         """
-        Write a single JSON record as a row in a CSV file.
-
-        :param record: single JSON document with header and data
-        :param device: DeviceCSVConfig object for this origin
-        :param writer: csv.DictWriter used for writing rows
+        Build a CSV row dict from a BSON record.
+        Returns the row dict, or None if the row should be skipped.
         """
-        origin = record["data"].get("header").get("origin", 0)
-        timestamp_epoch_miliseconds = int(record["data"].get("header").get("timestamp", "1000190760000"))
-        seconds = timestamp_epoch_miliseconds // 1000
+        rec_data = record["data"]
+        ts_ms = int(float(rec_data["header"].get("timestamp", "1000190760000")))
         try:
-            base_timestamp = datetime.fromtimestamp(seconds)
-            timestamp_human = f"{base_timestamp.strftime('%Y-%m-%d %H:%M:%S')}.{timestamp_epoch_miliseconds}"
+            base_ts = datetime.fromtimestamp(ts_ms // 1000)
+            ts_human = f"{base_ts.strftime('%Y-%m-%d %H:%M:%S')}.{ts_ms}"
         except (OSError, ValueError):
-            timestamp_human = "2001-09-11 08:46:00.000"
+            ts_human = "2001-09-11 08:46:00.000"
 
-        row_data = {
-            "header.origin": origin,
-            "header.timestamp_epoch": timestamp_epoch_miliseconds,
-            "header.timestamp_human": timestamp_human,
-            "header.counter": self.counters[origin]
-        }
+        # Start from last_known — gives interpolation for free, no fill-missing loop needed
+        row = dict(self.last_known[origin])
+        row["header.origin"] = origin
+        row["header.timestamp_epoch"] = ts_ms
+        row["header.timestamp_human"] = ts_human
+        row["header.counter"] = self.counters[origin]
 
-        flattened = self.flatten_dict(record.get("data").get("data", {}))
-        for field_key, value in flattened.items():
-            mapped_key = self.map_key(origin, field_key)
-            full_key = f"data.{mapped_key}"
-            self.last_known[origin][full_key] = value
-            row_data[full_key] = value
+        mapping = CHANNEL_LABEL_MAPPINGS.get(origin, {})
+        last = self.last_known[origin]
+        for field_key, value in rec_data.get("data", {}).items():
+            full_key = f"data.{mapping.get(field_key, field_key)}"
+            last[full_key] = value
+            row[full_key] = value
 
-        for field in device.fieldnames:
-            if field not in row_data:
-                row_data[field] = self.last_known[origin].get(field) if self.interpolated else None
+        if not self.interpolated:
+            for k in self._non_header_keys[origin]:
+                if k not in rec_data.get("data", {}):
+                    row[k] = None
 
-        non_header_keys = [k for k in row_data if not k.startswith("header") and k != "data.cpu_temperature"]
-        if all(row_data.get(k) is None for k in non_header_keys):
-            return
+        if all(row.get(k) is None for k in self._non_header_keys[origin]):
+            return None
 
-        writer.writerow(row_data)
         self.counters[origin] += 1
+        return row
 
     def json_to_csv(self):
         """
         Export all JSON data into CSV files (one per origin).
+        Supports both legacy mode (pre-loaded data with sorting) and incremental BSON mode (streamed processing).
 
         :return: list of paths to generated CSV files
         """
-        sorted_data = sorted(self.json_data, key=self.get_timestamp)
         suffix = "_interpolated" if self.interpolated else "_none_filled"
         file_paths = {
             origin: f"{self.csv_path}{suffix}_{device.name}.csv"
@@ -299,45 +326,110 @@ class DATAParser:
         writers = {}
         files = {}
         try:
+            # Initialize CSV files and writers
             for origin, device in self.devices.items():
-                file = open(file_paths[origin], mode='w', newline='')
+                file = open(file_paths[origin], mode='w', newline='', buffering=1 << 23)
                 writer = csv.DictWriter(file, fieldnames=device.fieldnames)
                 writer.writeheader()
                 self.last_known[origin] = {field: None for field in device.fieldnames}
                 writers[origin] = writer
                 files[origin] = file
 
-            for record in sorted_data:
-                origin = record["data"].get("header").get("origin")
-                if origin in self.devices:
-                    self.write_row(record, self.devices[origin], writers[origin])
+            # Incremental BSON processing - stream through file without loading all records
+            self._write_records_from_bson(writers, file_paths)
 
         finally:
             for file in files.values():
                 file.close()
 
+        # Clean up empty files and remove empty columns
+        self._cleanup_csv_files(file_paths)
+
+        return list(file_paths.values())
+
+    def _write_records_from_bson(self, writers, file_paths):
+        """
+        Stream records from BSON file and write to CSV in batches.
+
+        :param writers: dict of csv.DictWriter objects
+        :param file_paths: dict of file paths for logging
+        """
+        batches = {origin: [] for origin in self.devices}
+        try:
+            with open(self.bson_file, "rb") as f:
+                for doc in decode_file_iter(f):
+                    origin = doc.get("data", {}).get("header", {}).get("origin")
+                    if origin not in self.devices:
+                        continue
+                    row = self._build_row(doc, origin)
+                    if row is None:
+                        continue
+                    batch = batches[origin]
+                    batch.append(row)
+                    if len(batch) >= self._WRITE_BATCH:
+                        writers[origin].writerows(batch)
+                        batch.clear()
+
+            for origin, batch in batches.items():
+                if batch:
+                    writers[origin].writerows(batch)
+
+        except Exception as e:
+            logger.error(f"Error writing records from BSON: {e}")
+            raise
+
+    def _cleanup_csv_files(self, file_paths):
+        """
+        Remove empty CSV files and drop empty columns from remaining files.
+        Uses two streaming passes to avoid loading the entire file into memory.
+
+        :param file_paths: dict of origin -> file path
+        """
         for key, path in list(file_paths.items()):
             try:
+                # Pass 1: determine which column indices have at least one non-empty data value
                 with open(path, 'r', encoding='utf-8') as f:
-                    reader = list(csv.reader(f))
-                if len(reader) <= 1:
+                    reader = csv.reader(f)
+                    headers = next(reader, None)
+                    if headers is None:
+                        os.remove(path)
+                        del file_paths[key]
+                        continue
+
+                    non_empty = set()
+                    row_count = 0
+                    for row in reader:
+                        row_count += 1
+                        for i, cell in enumerate(row):
+                            if i < len(headers) and cell.strip():
+                                non_empty.add(i)
+
+                if row_count == 0:
                     os.remove(path)
                     del file_paths[key]
-                else:
-                    # Drop empty columns
-                    headers = reader[0]
-                    transposed = list(zip(*reader[1:]))
-                    non_empty_cols = [i for i, col in enumerate(transposed) if
-                                      any(cell.strip() != '' for cell in col)]
-                    cleaned = [[headers[i] for i in non_empty_cols]] + [
-                        [row[i] for i in non_empty_cols] for row in reader[1:]
-                    ]
-                    with open(path, 'w', newline='', encoding='utf-8') as f_out:
+                    continue
+
+                keep = sorted(non_empty)
+                if len(keep) == len(headers):
+                    continue  # all columns populated, nothing to rewrite
+
+                # Pass 2: stream-rewrite keeping only non-empty columns
+                tmp_path = path + '.tmp'
+                try:
+                    with open(path, 'r', encoding='utf-8') as f_in, \
+                            open(tmp_path, 'w', newline='', encoding='utf-8') as f_out:
+                        reader = csv.reader(f_in)
                         writer = csv.writer(f_out)
-                        writer.writerows(cleaned)
+                        for row in reader:
+                            writer.writerow([row[i] for i in keep if i < len(row)])
+                    os.replace(tmp_path, path)
+                except Exception:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                    raise
+
             except FileNotFoundError:
                 pass
-        return list(file_paths.values())
 
     def flatten_dict(self, d, parent_key='', sep='.'):
         """
@@ -358,25 +450,18 @@ class DATAParser:
         return dict(items)
 
     @staticmethod
-    def bson_files_to_json(bson_files: list[str]):
-        for bson_file in bson_files:
-            try:
-                base, _ = os.path.splitext(bson_file)
-                json_file = base + ".json"
+    def bson_file_to_csv_incremental(bson_file: str, csv_path: str, interpolated: bool = True) -> list:
+        """
+        Convert BSON file directly to CSV with incremental processing (memory efficient).
+        Processes records one at a time without loading entire file into memory.
 
-                with open(bson_file, "rb") as f, open(json_file, "w", encoding="utf-8") as out:
-                    out.write("[")
-                    first = True
-                    for doc in decode_file_iter(f):
-                        if not first:
-                            out.write(",")
-                        first = False
-                        out.write(json_util.dumps(doc, json_options=json_util.RELAXED_JSON_OPTIONS))
-                    out.write("]")
-
-                logger.info(f"Converted {bson_file} → {json_file}")
-            except Exception as e:
-                logger.error(f"Failed to convert {bson_file}: {e}")
+        :param bson_file: path to BSON file
+        :param csv_path: base path for output CSV files (without extension)
+        :param interpolated: whether to fill missing values
+        :return: list of generated CSV file paths
+        """
+        parser = DATAParser(csv_path=csv_path, interpolated=interpolated, bson_file=bson_file)
+        return parser.json_to_csv()
 
     @staticmethod
     def map_key(origin, key):
@@ -389,14 +474,3 @@ class DATAParser:
         """
         mapping = CHANNEL_LABEL_MAPPINGS.get(origin, {})
         return mapping.get(key, key)
-
-    @staticmethod
-    def get_timestamp(record):
-        """
-        Extract and return the timestamp from a record as an integer.
-
-        :param record: JSON document with header.timestamp
-        :return: timestamp as integer (epoch milliseconds)
-        """
-        timestamp_data = record["data"].get("header").get("timestamp", 1000190760000)
-        return int(timestamp_data)

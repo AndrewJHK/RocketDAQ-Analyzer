@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
 )
 from gui.panels.data_acquisition_panel import UploadPanel
 from gui.panels.data_processing_panel import DataProcessingPanel
-from gui.panels.flight_plot_panel import FlightPlotPanel
+from gui.panels.monkey_panel import MonkeyPanel
 from gui.panels.plotting_panel import PlottingPanel
 from src.data_processing import DataFrameWrapper
 import os
@@ -34,7 +34,7 @@ class FileWidget(QWidget):
 class PostProcessingApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Postprocessing GUI")
+        self.setWindowTitle("RocketDAQ Analyzer")
 
         self.file_widgets = []
         self.dataframes = {}
@@ -46,13 +46,13 @@ class PostProcessingApp(QWidget):
         sidebar_layout.setSpacing(10)
 
         self.load_button = QPushButton("1. Load data")
-        self.flight_plot_button = QPushButton("2. Flight plot")
+        self.monkey_button = QPushButton("2. Monkey data extraction")
         self.processing_button = QPushButton("3. Data processing")
         self.plotter_button = QPushButton("4. Plotting")
 
         self.buttons = [
             self.load_button,
-            self.flight_plot_button,
+            self.monkey_button,
             self.processing_button,
             self.plotter_button
         ]
@@ -62,12 +62,12 @@ class PostProcessingApp(QWidget):
             btn.setStyleSheet("QPushButton { padding: 6px; } QPushButton:checked { background-color: lightblue; }")
 
         self.load_button.clicked.connect(lambda: self.change_panel(0, self.load_button))
-        self.flight_plot_button.clicked.connect(lambda: self.change_panel(1, self.flight_plot_button))
+        self.monkey_button.clicked.connect(lambda: self.change_panel(1, self.monkey_button))
         self.processing_button.clicked.connect(lambda: self.change_panel(2, self.processing_button))
         self.plotter_button.clicked.connect(lambda: self.change_panel(3, self.plotter_button))
 
         sidebar_layout.addWidget(self.load_button)
-        sidebar_layout.addWidget(self.flight_plot_button)
+        sidebar_layout.addWidget(self.monkey_button)
         sidebar_layout.addWidget(self.processing_button)
         sidebar_layout.addWidget(self.plotter_button)
 
@@ -80,13 +80,14 @@ class PostProcessingApp(QWidget):
         sidebar_layout.addWidget(self.scroll_area, stretch=1)
 
         self.stack = QStackedWidget()
+
         self.upload_panel = UploadPanel(add_callback=self.add_dataframe, add_file_widget=self.add_file)
-        self.flight_panel = FlightPlotPanel()
+        self.monkey_panel = MonkeyPanel(add_callback=self.add_dataframe, add_file_widget=self.add_file)
         self.processing_panel = DataProcessingPanel()
         self.plotting_panel = PlottingPanel()
 
         self.stack.addWidget(self.upload_panel)
-        self.stack.addWidget(self.flight_panel)
+        self.stack.addWidget(self.monkey_panel)
         self.stack.addWidget(self.processing_panel)
         self.stack.addWidget(self.plotting_panel)
 
@@ -107,7 +108,7 @@ class PostProcessingApp(QWidget):
 
     def add_dataframe(self, file_path, wrapper: DataFrameWrapper):
         self.dataframes[file_path] = wrapper
-        self.flight_panel.add_dataframe(file_path, wrapper)
+        self.monkey_panel.add_dataframe(file_path, wrapper)
         self.processing_panel.add_dataframe(file_path, wrapper)
         self.plotting_panel.add_dataframe(file_path, wrapper)
 
@@ -130,6 +131,6 @@ class PostProcessingApp(QWidget):
             del self.dataframes[file_path]
 
         self.upload_panel.remove_dataframe(file_path)
-        self.flight_panel.remove_dataframe(file_path)
+        self.monkey_panel.remove_dataframe(file_path)
         self.processing_panel.remove_dataframe(file_path)
         self.plotting_panel.remove_dataframe(file_path)

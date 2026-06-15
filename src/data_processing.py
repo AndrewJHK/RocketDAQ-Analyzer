@@ -1,12 +1,5 @@
 import dask.dataframe as dd
-import numpy as np
-import pandas as pd
-from scipy.spatial.transform import Rotation
-from ahrs.filters import EKF
-from ahrs.common.orientation import acc2q
 from src.filters import DataFilter
-
-EQUATIONS = {"biliq": "placeholder", "broom_stick": "placeholder"}
 
 
 def sync_with_wrapper(method):
@@ -22,7 +15,8 @@ class DataFrameWrapper:
     def __init__(self, csv_path):
         self.csv_path = csv_path
         self.df = dd.read_csv(csv_path, assume_missing=True)
-        self.df = self.df.set_index("header.counter", sorted=True, drop=False)
+        if "header.counter" in self.df.columns:
+            self.df = self.df.set_index("header.counter", sorted=True, drop=False)
 
     def get_dataframe(self):
         return self.df
@@ -33,9 +27,6 @@ class DataFrameWrapper:
     def update_dataframe(self, dataframe):
         self.df = dataframe
 
-    def get_raw_pandas(self):
-        return pd.read_csv(self.csv_path, parse_dates=["TIMESTAMP"], index_col="header.counter")
-
 
 class DataProcessor:
     def __init__(self, df_wrapper, log_fn=None):
@@ -43,9 +34,6 @@ class DataProcessor:
         self.df_wrapper = df_wrapper
         self.df = df_wrapper.get_dataframe()
         self.filter_manager = DataFilter(log_fn=log_fn)  # Handles filter strategies
-
-    def get_filters(self):
-        return self.filter_manager.get_filter_queue()
 
     def add_filter(self, columns, filter_name, **kwargs):
         """Adds a predefined filter with parameters to be applied later."""
@@ -104,28 +92,6 @@ class DataProcessor:
 
         self.df = self.df.persist()
 
-    @sync_with_wrapper
-    def scale_index_by_equation(self, equation_func, start_idx=None, end_idx=None):
-        """
-        Scales the DataFrame index based on a time-dependent function.
-
-        :param equation_func: a function that accepts index and returns scale factor
-        :param start_idx: optional starting index for applying the scale
-        :param end_idx: optional ending index for applying the scale
-        """
-
-        def apply_func(partition):
-            idx = partition.index
-            if start_idx is not None:
-                partition = partition.loc[(idx >= start_idx)]
-            if end_idx is not None:
-                partition = partition.loc[(idx <= end_idx)]
-            scale_factors = equation_func(idx)
-            partition.index = idx * scale_factors
-            return partition
-
-        self.df = self.df.map_partitions(apply_func)
-
     def find_index_where_max(self, column_to_max, condition_column):
         """
         Finds the index and value in column_to_max where condition_column has its maximum.
@@ -173,107 +139,6 @@ class DataProcessor:
     @sync_with_wrapper
     def rename_column(self, columns, new_name):
         self.df = self.df.rename(columns={columns: new_name})
-
-    def interpolate_index(self):
-        df_pd = self.df_wrapper.get_raw_pandas()
-        df_pd = df_pd.copy()
-        df_pd["Time"] = (df_pd["header.timestamp_epoch"] - pd.Timestamp("1970-01-01")) // pd.Timedelta("10ms")
-        df_pd["Time"] = df_pd["Time"] - df_pd["Time"].iloc[0]
-        df_pd.set_index("Time", inplace=True)
-        df_pd = df_pd.reindex(range(df_pd.index.min(), df_pd.index.max() + 1), fill_value=pd.NA)
-        df_pd.interpolate(inplace=True)
-        self.df = dd.from_pandas(df_pd, npartitions=1)
-
-    def compute_orientation(self):
-        df_pd = self.df.compute()
-        df_pd = df_pd.copy()
-        acc = df_pd[["data.telemetry.acc_data.x", "data.telemetry.acc_data.y", "data.telemetry.acc_data.z"]].to_numpy()
-        gyro = df_pd[["data.telemetry.quaternion.roll", "data.telemetry.quaternion.pitch",
-                      "data.telemetry.quaternion.heading"]].to_numpy()
-
-        acc[:, 0] -= np.mean(acc[:20, 0])
-        acc[:, 1] -= np.mean(acc[:20, 2])
-
-        gyro[:, 0] -= np.mean(gyro[:20, 0])
-        gyro[:, 1] -= np.mean(gyro[:20, 1])
-        gyro[:, 2] -= np.mean(gyro[:20, 2])
-
-        ekf = EKF(
-            gyr=gyro,
-            acc=acc,
-            q0=acc2q(acc[0, :]),
-            dt=0.01,
-            var_gyr=0.1 ** 2,
-            var_acc=0.3 ** 2,
-            frame="ENU",
-        )
-
-        df_pd["data.telemetry.quaternion.q0_computed"] = ekf.Q[:, 1]
-        df_pd["data.telemetry.quaternion.q1_computed"] = ekf.Q[:, 2]
-        df_pd["data.telemetry.quaternion.q2_computed"] = ekf.Q[:, 3]
-        df_pd["data.telemetry.quaternion.q3_computed"] = ekf.Q[:, 0]
-
-        self.df = dd.from_pandas(df_pd, npartitions=1)
-
-    def compute_position_from_orientation(self):
-        df_pd = self.df.compute()
-        df_pd = df_pd.copy()
-        acc = df_pd[["data.telemetry.acc_data.x", "data.telemetry.acc_data.y", "data.telemetry.acc_data.z"]].to_numpy()
-        orient = df_pd[["data.telemetry.quaternion.q0_computed", "data.telemetry.quaternion.q1_computed",
-                        "data.telemetry.quaternion.q2_computed",
-                        "data.telemetry.quaternion.q3_computed"]].to_numpy()
-
-        acc[:, 0] -= np.mean(acc[:20, 0])
-        acc[:, 1] -= np.mean(acc[:20, 2])
-
-        acc_global = np.zeros_like(acc)
-        for i in range(len(acc_global)):
-            rot = Rotation.from_quat(orient[i, :])
-            acc_global[i, :] = rot.apply(acc[i, :])
-
-        x_acc, y_acc, z_acc = acc_global.T
-        z_acc_offset = np.mean(z_acc[:20])
-        z_acc -= z_acc_offset
-
-        accel_coef = 9.81 / z_acc_offset
-        x_acc *= accel_coef
-        y_acc *= accel_coef
-        z_acc *= accel_coef
-
-        x_vel = np.cumsum(x_acc) * 0.01
-        y_vel = np.cumsum(y_acc) * 0.01
-        z_vel = np.cumsum(z_acc) * 0.01
-
-        x_pos = np.cumsum(x_vel) * 0.01
-        y_pos = np.cumsum(y_vel) * 0.01
-        z_pos = np.cumsum(z_vel) * 0.01
-
-        df_pd["Computed_Acc_X"] = x_acc
-        df_pd["Computed_Acc_Y"] = y_acc
-        df_pd["Computed_Acc_Z"] = z_acc
-        df_pd["Computed_Vel_X"] = x_vel
-        df_pd["Computed_Vel_Y"] = y_vel
-        df_pd["Computed_Vel_Z"] = z_vel
-        df_pd["Computed_Pos_X"] = x_pos
-        df_pd["Computed_Pos_Y"] = y_pos
-        df_pd["Computed_Pos_Z"] = z_pos
-
-        self.df = dd.from_pandas(df_pd, npartitions=1)
-
-    @sync_with_wrapper
-    def compute_flight_profile(self):
-        columns_to_keep = ["header.timestamp_epoch", "data.telemetry.acc_data.x", "data.telemetry.acc_data.y",
-                           "data.telemetry.acc_data.z",
-                           "data.telemetry.quaternion.roll", "data.telemetry.quaternion.pitch",
-                           "data.telemetry.quaternion.heading",
-                           "data.telemetry.quaternion.q0", "data.telemetry.quaternion.q1",
-                           "data.telemetry.quaternion.q2",
-                           "data.telemetry.quaternion.q3"]
-        columns_to_drop = [col for col in self.df.columns if col not in columns_to_keep]
-        self.drop_data(columns=columns_to_drop)
-        self.interpolate_index()
-        self.compute_orientation()
-        self.compute_position_from_orientation()
 
     def get_processed_data(self):
         """Returns the processed DataFrame."""

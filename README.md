@@ -1,270 +1,276 @@
-# RocketDAQ Analyzer
+# RocketDAQAnalyzer
 
-## Preface
-The developed application constitutes an integral part of the engineering thesis entitled
-“Digital filtering of data from pressure sensors in the rocket engine system.” </br>
-The software was created to support the analysis and post-processing of experimental data 
-acquired during rocket engine test campaigns and serves as a practical implementation of the methods discussed in this work.
+> The developed application constitutes an integral part of the engineering thesis entitled
+> **"Digital filtering of data from pressure sensors in the rocket engine system."**
+> The software was created to support the analysis and post-processing of experimental data acquired
+> during rocket engine test campaigns and serves as a practical implementation of the methods discussed
+> in this work.
 
+
+
+RocketDAQAnalyzer is a Python desktop application for post-processing and analysis of telemetry data
+acquired from rocket engine static fire test campaigns. It ingests raw data exported from MongoDB
+(BSON format) or pre-converted CSV files, applies signal processing and digital filtering pipelines,
+performs frequency-domain analysis, and produces publication-quality plots.
 
 ## Features
-- BSON data retrieval
-- BSON to JSON conversion
-- JSON to csv conversion
-- Data cleanup and analysis
-- Plotting of the csv data and saving them as separate files
-- Plotting of the flight telemetry on animated plots
 
-
-
-## Getting Started
-
-
-
-### Prerequisites
-
-Ensure you have the following installed:
-
-- Python 3.10+
-- `pip` (Python package installer)
+- **BSON / MongoDB ingestion** — parse raw MongoDB exports or connect live to a test-campaign database
+- **Flexible data loading** — interpolated or None-filled missing-value handling on import
+- **Data transformation** — normalize, scale, offset, sign-flip, sort, rename, drop columns/rows
+- **Digital filtering pipeline** — queue and apply multiple filters in sequence per channel
+  - Low-pass Butterworth (IIR, zero-phase)
+  - Adaptive Kalman filter (constant and constant-velocity models)
+  - Wavelet denoising (PyWavelets, configurable level and thresholding mode)
+  - Rolling mean and rolling median
+  - Threshold clipping, negative/positive removal
+- **Frequency-domain analysis** — FFT (periodogram) and Spectrogram (STFT) with configurable parameters
+- **Advanced plotting** — dual Y-axes, line/scatter, custom colors, reference lines, time offset
+- **Dataset synchronization** — align two datasets by peak detection for ignition-relative time axis
+- **Non-blocking UI** — all heavy operations run in background threads via Qt thread pool
 
 ---
 
-### Setting Up the Environment
+## Requirements
 
-1. **Clone the Repository**
+- Python 3.10+
+- `pip`
 
-   Clone the repository to your local machine:
+| Package | Version |
+|---|---|
+| PyQt6 | ~6.8.1 |
+| matplotlib | ~3.7.0 |
+| numpy | ~1.26.4 |
+| pandas | ~2.2.3 |
+| scipy | ~1.15.2 |
+| dask\[dataframe\] | ~2024.10.0 |
+| PyWavelets | ~1.8.0 |
+| pymongo | ~4.15.1 |
+| AHRS | ~0.3.1 |
+
+---
+
+## Installation
+
+1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/AndrewJHK/RocketDAQ-Analyzer
-   cd RocketDAQ-Analyzer
+   git clone https://github.com/AndrewJHK/postprocessing-app
+   cd postprocessing-app
    ```
 
-2. **Create a Virtual Environment**
-
-   It's recommended to use a virtual environment to manage dependencies. Run the following command to create a virtual
-   environment:
+2. **Create a virtual environment**
 
    ```bash
    python -m venv venv
    ```
 
-3. **Activate the Virtual Environment**
+3. **Activate the virtual environment**
 
-   Activate the virtual environment using the appropriate command for your operating system:
+   - Windows:
+     ```bash
+     venv\Scripts\activate
+     ```
+   - macOS / Linux:
+     ```bash
+     source venv/bin/activate
+     ```
 
-    - **Windows:**
+4. **Install dependencies**
 
-      ```bash
-      venv\Scripts\activate
-      ```
-
-    - **macOS and Linux:**
-
-      ```bash
-      source venv/bin/activate
-      ```
-
-4. **Install Required Packages**
-
-   With the virtual environment activated, install the required Python packages:
    ```bash
    pip install -r requirements.txt
    ```
 
----
+5. **Run the application**
 
-## Usage
-
-App consists of 4 main panels
-
-- Data acquisition
-- Flight plot
-- Data processing
-- Plotting
+   ```bash
+   python main.py
+   ```
 
 ---
 
-### Data acquisition
+## Application Overview
 
-Here you can retrieve data straight from the MongoDB database as BSON types based on two possible indexes:
+The application is organized into four panels, designed to be used in sequence.
 
-- **Document number** - Selecting the appropriate button and filling out the start and stop indexes will result in retrieval
-    of that range of documents - rows.
-- **Date** - Selecting the time related button and filling out the start and end date will result in retrieval
-    of all the documents - rows - that have been saved in provided time frame.
+### Panel 1 — Load Data
 
-On top of that this panel supports the loading the csv data, conversion of json files to csv and conversion of bson files to json. Loaded files will show up on the left in the list with an
-adjacent delete button.</br>
-JSON loading has two radio buttons:
+Import data into the application session.
 
-- **Interpolate** - Every column will have a value for every timestamp that will appear.
-  Sometimes for a specific timestamp only 3 of 6 channels sent data. In that case value from a previous timestamp shall
-  be assigned to this one.
-- **Fill None** - When there is no value for specific column in a specific timestamp it will be assigned 'None'.
+- **Convert BSON to CSV** — select a `.bson` file exported from MongoDB; choose interpolation mode:
+  - *Interpolated* — each channel carries forward its last known value for every timestamp
+  - *None filled* — missing values are left as `None`
+- **Load CSV** — load an already-converted CSV file directly
+- **Connect to MongoDB** — connect to a live database at a custom IP and port, browse databases and
+  collections, and download a collection by document index range or by UTC time range
 
-After conversion of JSON file you still need to load them as csv files.
-
+Loaded files appear in the file list on the left. Any file can be removed from the session via its
+delete button. Conversion and download status are logged in the panel's log output.
 
 ---
 
-### Flight Plot
+### Panel 2 — Monkey Data Extraction
 
-Choose a csv file that contains required data columns - header.timestamp_epoch, data.telemetry.acc_data.\*,
-data.telemetry.quaternion.\*
-Simply click compute button and wait for the results - computed apogee, max speed and plots. Currently, the animation
-for
-rotation is not working so its disabled and waiting for fix.
-If you want to save the computed data remember to click the save to file button.
+A step-by-step wizard for downloading collections from a MongoDB instance:
 
----
-
-### Data Processing
-
-This panel is responsible for all kinds of data transformation, analysis and filtration. </br> </br>
-**REMEMBER THAT ANY DATA CHANGES THAT CAN BE MADE IN THIS PANEL ARE NOT REFLECTED IN THE FILE ITSELF. THEY WILL BE IF
-YOU
-SAVE SAID DATA INTO A FILE WITH A PROVIDED BUTTON.**</br></br>
-When you select a data that you want to transform, all the available columns will show up with a checkbox for an easy
-selection.
+1. Connect to the database (PCC network or external)
+2. Select database and collection
+3. Configure download range (by document index or time window)
+4. Download and convert to CSV (with interpolation option)
+5. Auto-load the converted file into the session
 
 ---
+
+### Panel 3 — Data Processing
+
+All transformations operate on in-memory copies of the data. **Changes are not written to disk until
+you explicitly save the file using the save button in this panel.**
 
 #### Operations
 
-Possible operations are:
+Select one or more columns and apply a single operation:
 
-- **normalize** - take content of each selected column and perform a min-max value normalization of them
-- **scale** - take content of each selected column and scale them by a factor provided in parameters box - 'factor=x'
-- **flip_sign** - take content of each selected columns and change the sign + into -, </br> - into +
-- **sort** - select only one column and sort the whole data by that specific column. In parameters specify if it should
-  be
-- **rename** - select only one column and rename it
-  ascending or descending by writing 'ascending=True/False'
-- **drop** - when selecting drop operation, three radio buttons will appear:
-    - **Drop by columns** - the selected columns will be deleted
-    - **Drop by index range** - all rows in the range provided in params will be deleted fe. 0,200
-    - **Drop by condition (lambda)** - all rows that meet the specified condition provided in parameters will be deleted
-      fe 'rows["data.PT4.scaled"]>20'
-
----
+| Operation | Description |
+|---|---|
+| `normalize` | Min-max normalization of each selected column |
+| `scale` | Multiply all values by a factor — parameter: `factor=x` |
+| `offset` | Add a constant offset — parameter: `offset=x` |
+| `flip_sign` | Negate all values |
+| `absolute` | Take the absolute value of all values |
+| `rename` | Rename a single selected column |
+| `sort` | Sort the entire dataframe by a single column — parameter: `ascending=True/False` |
+| `drop` | Remove data: by selected columns, by index range (e.g. `0,200`), or by a condition lambda (e.g. `rows["data.PT4"]>20`) |
 
 #### Filters
 
-Firstly queue all the filters in an order that you wish they should be executed for a specified columns. Then hit the
-apply button to start the application queue.</br>
-Possible filters are:
+Build a filter queue by adding filters in the desired execution order, then click **Apply** to run
+the full queue on the selected columns.
 
-- **remove_negatives** - replace all negative values with 0
-- **remove_positives** - replace all positive values with 0
-- **rolling_mean** - perform a rolling mean filter with a specified windows size in parameters fe. 'window=10'
-- **rolling_median** - perform a rolling median filter with a specified windows size in parameters fe. 'window=10'
-- **threshold** - replace all the values that exceed a provided value with that value fe. 'threshold=35'
-- **wavelet_transform** - perform a wavelet decomposition and recomposition with specified parameters fe. '
-  wavelet_name=coif5,level=10,threshold_mode=soft'.
-    - **wavelet_name** - specify what kind of wavelet decomposition to use. After testing 'coif5' seems to be working
-      the
-      best. List in [documentation](https://pywavelets.readthedocs.io/en/latest/ref/wavelets.html)
-    - **level** - level of decomposition and smoothing of the signal to perform, </br> range of integer values 1-10. The
-      higher the level the smoother the signal which means that details might be lost
-    - **threshold_mode** - type of thresholding either soft or hard. Soft provides a smoother result.
+| Filter | Parameters | Description |
+|---|---|---|
+| `low_pass` | `cutoff=x`, `order=x`, `fs=x` | Zero-phase Butterworth IIR low-pass filter |
+| `adaptive_kalman` | `model=constant\|constant_velocity` | Adaptive Kalman filter |
+| `wavelet_transform` | `wavelet_name=coif5`, `level=1–10`, `threshold_mode=soft\|hard` | Wavelet decomposition denoising |
+| `rolling_mean` | `window=x` | Moving average over a sliding window |
+| `rolling_median` | `window=x` | Moving median over a sliding window |
+| `threshold` | `threshold=x` | Clip all values exceeding the threshold |
+| `remove_negatives` | — | Replace all negative values with 0 |
+| `remove_positives` | — | Replace all positive values with 0 |
 
----
+Filtered columns are saved under a new name that encodes the filter chain, preserving the original
+column in the dataset.
 
 #### Frequency Analysis
 
-This section allows you to perform **frequency-domain analysis** on any numeric signal present in your data.  
-It provides two main tools: **Fast Fourier Transform (FFT)** and **Spectrogram** computation.
+Select a file and at least one column, then run either analysis. If the dataset contains a
+recognizable time column (`header.timestamp_epoch`, `header.timestamp`, or `time`), the sampling
+rate is estimated automatically; otherwise it defaults to 1.0 Hz or the manually entered value.
+Results are saved automatically to the `plots/` directory as PNG files.
 
-After selecting a file and at least one column (signal) from the list, you can configure and plot either an FFT or a spectrogram.  
-If your dataset contains a column representing time (for example `header.timestamp_epoch`, `header.timestamp`, or `time`), it will be **automatically detected and used** for frequency estimation.  
-If no such column is found, the analysis assumes a sampling rate of `1.0 Hz` or uses the value provided manually.
+**FFT (Periodogram)**
 
----
+| Parameter | Description |
+|---|---|
+| Fs [Hz] | Sampling frequency (auto-detected if left empty) |
+| Samples for FFT | Number of samples used; larger values improve frequency resolution |
+| Window | Windowing function: `hann`, `hamming`, `blackman`, `boxcar` |
+| Detrend | Remove DC offset and linear trend before transform |
+| dB scale | Display amplitude spectrum in decibels |
+| Max freq [Hz] | Limit the displayed frequency axis |
 
-##### FFT (Fast Fourier Transform)
+**Spectrogram (STFT)**
 
-This tool generates a **frequency spectrum** of the selected signal, showing how the signal’s amplitude or power is distributed across frequencies.
-
-**Parameters:**
-- **Fs [Hz]** — sampling frequency.  
-  Leave empty to automatically infer from the detected time column (if present).  
-  If no time column is available, a default value of `1.0 Hz` is used.
-- **Samples for FFT** — number of samples used for the FFT computation.  
-  Larger values provide better frequency resolution at the cost of longer computation time.
-- **Window** — type of windowing function applied before the transform (`hann`, `hamming`, `blackman`, `boxcar`).
-- **Detrend** — if enabled, removes the DC component and any linear trend before transformation.
-- **dB scale** — if enabled, displays the amplitude spectrum in decibels.
-- **Max freq [Hz]** — optionally limit the displayed frequency range.
-- **Plot FFT** — computes and displays the FFT of the selected signal.
-
-The FFT result is automatically saved in the `plots/` directory as a `.png` file.
-
----
-
-##### Spectrogram
-
-The spectrogram visualizes how the frequency content of a signal changes over time, using a short-time Fourier transform (STFT).
-
-**Parameters:**
-- **Fs [Hz]** — sampling frequency, inferred automatically if a recognizable time column exists.
-- **Number of samples** — number of samples per STFT segment (default: `512`).
-- **Overlap size** — number of overlapping samples between segments (default: 50% of `nperseg` if left empty).
-- **Window** — window function used for each segment (`hann`, `hamming`, `blackman`, `boxcar`).
-- **Mode** — determines what is shown in the spectrogram (`psd`, `magnitude`, `complex`, `angle`, `phase`).
-  - **`psd`** *(Power Spectral Density)* — shows signal power per frequency band, proportional to energy content.  
-    This is the default and most commonly used mode for physical signals such as pressure or voltage.
-  - **`magnitude`** — displays the absolute magnitude of the FFT for each time window, without squaring.  
-    Useful when you care about amplitude, not power.
-  - **`complex`** — shows complex FFT coefficients (real + imaginary).  
-    Mostly used for debugging or when you need phase-sensitive information.
-  - **`angle`** — visualizes the phase angle (argument) of each FFT component in radians.  
-    Helpful for phase tracking between frequencies.
-  - **`phase`** — similar to `angle`, but wraps the phase to the range `[-π, π]`.  
-    This is useful for analyzing phase shifts or synchronization between signals.
-- **dB scale** — whether to display values in decibels.
-- **Colormap** — name of the color palette used for visualization (for example: `viridis`, `plasma`, `inferno`).
-- **Plot Spectrogram** — generates and displays the spectrogram for the selected signal.
-
-The resulting spectrogram image is also saved automatically in the `plots/` directory.
+| Parameter | Description |
+|---|---|
+| Fs [Hz] | Sampling frequency |
+| Number of samples | Samples per STFT segment (default 512) |
+| Overlap size | Overlapping samples between segments (default 50 % of segment length) |
+| Window | `hann`, `hamming`, `blackman`, `boxcar` |
+| Mode | `psd` (power spectral density), `magnitude`, `complex`, `angle`, `phase` |
+| dB scale | Display values in decibels |
+| Colormap | Matplotlib colormap name (e.g. `viridis`, `plasma`, `inferno`) |
 
 ---
 
-### Plotting
+### Panel 4 — Plotting
 
-#### General info
+Visualize loaded and processed data. Plots are saved as PNG to the `plots/` directory.
 
-Here you can plot data that you loaded and transformed in the previous panel. It is possible to have two separately
-scaled Y axes and combining a plot from two different databases. The X axis can be changed, by default the X axis is
-'header.timestamp_epoch' but it can be changed for each data column individually. </br>
-On top of that it can be automatically
-converted to seconds and milliseconds, as well shift the
-graph in time by providing the offset in milliseconds in the specified box. Negative values shift the graph to the left
-and positive to the right.
-On the bottom you can enter horizontal and vertical dotted lines.
+#### Axes and series
 
-#### Synchronization
+- Add any loaded column to **Y1** (left axis) or **Y2** (right axis)
+- Choose plot type per series: **Line** or **Scatter**
+- Customize color, transparency, and marker size per series
+- Set custom axis labels and plot title
 
-The provided button will try to synchronize timestamps of two databases. </br>
-Synchronization is tuned for static engine tests, it will look for the highest values of selected columns, and compare
-their timestamps.
-After that it will synch db2 to db1 and provide an offset in milliseconds to copy and paste into offset window resulting
-in shifting the whole graph so the ignition happens at 0 seconds. The synchronization will overwrite the data, but as
-always it needs to be saved to be preserved.
+#### X-axis
 
-### Deactivating the Virtual Environment
+- Default X axis is `header.timestamp_epoch` (Unix timestamp in milliseconds)
+- Convert to **seconds** or **milliseconds** relative to the first sample
+- Apply a **time offset** (in ms) to shift a series left (negative) or right (positive) along the time axis — useful for aligning datasets manually
 
-When you're done working on the project, deactivate the virtual environment by running:
+#### Reference lines
 
-```bash
-deactivate
+Add any number of horizontal or vertical dotted reference lines with custom colors to mark events,
+ignition timing, or operating thresholds.
+
+#### Dataset synchronization
+
+When two datasets from different acquisition devices are loaded, the **Synchronize** button aligns
+them automatically:
+
+1. Detects the timestamp of the peak value in the selected column of each dataset
+2. Computes the time delta between the two peaks
+3. Applies an offset to dataset 2 so both peaks align with dataset 1
+4. Reports the offset in milliseconds — paste it into the offset field to shift the plot to place
+   ignition at t = 0 s
+
+The synchronization overwrites the timestamp column in memory. Save the file to make it permanent.
+
+---
+
+## Data Format
+
+Expected CSV structure after BSON conversion:
+
+| Column | Description |
+|---|---|
+| `header.timestamp_epoch` | Unix timestamp in milliseconds |
+| `header.timestamp_human` | Human-readable UTC timestamp |
+| `header.counter` | Record sequence number |
+| `header.origin` | Device / sensor identifier |
+| `data.*` | Measurement channels (pressure, temperature, etc.) |
+
+Supported device types in BSON parsing: LPB, ADV-USB, ADV-PCIE, COMP.
+
+---
+
+## Project Structure
+
+```
+postprocessing-app/
+├── main.py                        # Application entry point
+├── requirements.txt
+│
+├── gui/
+│   ├── gui.py                     # Main window and panel navigation
+│   └── panels/
+│       ├── data_acquisition_panel.py
+│       ├── monkey_panel.py
+│       ├── data_processing_panel.py
+│       └── plotting_panel.py
+│
+└── src/
+    ├── data_acquisition.py        # BSON parsing and MongoDB client
+    ├── data_processing.py         # DataFrame transformation API
+    ├── filters.py                 # Signal filter implementations
+    ├── plotter.py                 # Matplotlib rendering
+    └── processing_utils.py        # Logging, threading utilities
 ```
 
-## Contributing
-
-Contributions are welcome! Please fork the repository and submit a pull request.
+---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

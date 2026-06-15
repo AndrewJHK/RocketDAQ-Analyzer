@@ -6,7 +6,8 @@ from PyQt6.QtWidgets import (
 
 from src.data_processing import DataProcessor
 from src.plotter import Plotter
-from src.processing_utils import logger
+from src.processing_utils import logger, Worker, show_processing_dialog
+from PyQt6.QtCore import QThreadPool
 
 
 class PlotColumnWidget(QWidget):
@@ -72,6 +73,7 @@ class PlottingPanel(QWidget):
         self.secondary_db_offset = 0
         self.db1_columns = []
         self.db2_columns = []
+        self.threadpool = QThreadPool()
 
         layout = QVBoxLayout()
 
@@ -130,7 +132,7 @@ class PlottingPanel(QWidget):
 
         self.start_offset = QLineEdit()
         self.start_offset.setReadOnly(True)
-        right_top.addWidget(QLabel("Start offset:"))
+        right_top.addWidget(QLabel("Start offset from autosync for copy paste:"))
         right_top.addWidget(self.start_offset)
 
         sync_row = QHBoxLayout()
@@ -281,12 +283,42 @@ class PlottingPanel(QWidget):
         if db2_path in self.dataframes:
             selected_dataframes["db2"] = self.dataframes[db2_path]
 
-        plotter = Plotter(config_dict=config, dataframe_map=selected_dataframes, plots_folder_path="plots")
-        try:
-            plotter.plot()
-            self.log("Plot generated successfully.", "INFO")
-        except Exception as e:
-            self.log(f"Error during plot generation: {e}", "ERROR")
+        def task(signals=None):
+            """Worker task: Prepare plot data (heavy .compute() calls)"""
+            try:
+                if signals:
+                    signals.log.emit("Preparing data for plot...", "INFO")
+
+                plotter = Plotter(config_dict=config, dataframe_map=selected_dataframes, plots_folder_path="plots")
+                plot_data = plotter.prepare_plot_data()
+
+                if signals:
+                    signals.log.emit("Data prepared, rendering plot...", "INFO")
+
+                return {"success": True, "plotter": plotter, "plot_data": plot_data}
+            except Exception as e:
+                if signals:
+                    signals.log.emit(f"Error preparing plot: {e}", "ERROR")
+                return {"success": False, "error": str(e)}
+
+        def apply_ui(payload):
+            """Main thread callback: Render the interactive plot"""
+            if payload["success"]:
+                try:
+                    plotter = payload["plotter"]
+                    plot_data = payload["plot_data"]
+                    # This will call plot.show() on the main thread (required by matplotlib)
+                    plotter.plot_from_data(plot_data)
+                    self.log("Plot displayed successfully.", "INFO")
+                except Exception as e:
+                    self.log(f"Error rendering plot: {e}", "ERROR")
+            else:
+                self.log(f"Plot preparation failed: {payload.get('error', 'Unknown error')}", "ERROR")
+
+        worker = Worker(task)
+        worker.signals.log.connect(self.log)
+        worker.signals.result.connect(apply_ui)
+        show_processing_dialog(self, self.threadpool, worker)
 
     def sync_databases(self):
         db1_path = self.db1_selector.currentText()
@@ -294,7 +326,7 @@ class PlottingPanel(QWidget):
         col1 = self.sync_col1.currentText()
         col2 = self.sync_col2.currentText()
         split = db1_path.split("/")
-        db1_name=split[-1]
+        db1_name = split[-1]
         if db1_path not in self.dataframes or db2_path not in self.dataframes:
             self.log("Both DBs must be selected for syncing.", "INFO")
             return
@@ -310,7 +342,8 @@ class PlottingPanel(QWidget):
             self.secondary_db_offset = val1 - val2
             self.log(f"Syncing DB2 by offset {self.secondary_db_offset} based on max of {col1} and {col2}", "INFO")
 
-            df2[f"header.timestamp_epoch_syncedwith_{db1_name}"] = df2["header.timestamp_epoch"].compute() + self.secondary_db_offset
+            df2[f"header.timestamp_epoch_syncedwith_{db1_name}"] = df2[
+                                                                       "header.timestamp_epoch"].compute() + self.secondary_db_offset
             dp2.df_wrapper.update_dataframe(df2)
 
             first_value = df1['header.timestamp_epoch'].compute().iloc[0]
@@ -429,3 +462,7 @@ class PlottingPanel(QWidget):
                 logger.debug(message)
             case "INFO":
                 logger.info(message)
+            case "WARNING":
+                logger.warning(message)
+            case "ERROR":
+                logger.error(message)

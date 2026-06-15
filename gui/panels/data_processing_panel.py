@@ -3,11 +3,14 @@ from PyQt6.QtWidgets import (
     QPushButton, QTextEdit, QCheckBox, QLineEdit, QFormLayout,
     QGroupBox, QFileDialog, QScrollArea, QListWidget, QRadioButton, QSpacerItem, QSizePolicy
 )
-from PyQt6.QtCore import QThreadPool, QTimer
+from PyQt6.QtCore import QThreadPool, QTimer, QThread
 from src.plotter import Plotter
 from src.data_processing import DataProcessor
 from src.processing_utils import logger, Worker, show_processing_dialog
-import re
+import numpy as np
+from scipy import signal
+import matplotlib.pyplot as plot
+import os
 
 
 class DataProcessingPanel(QWidget):
@@ -260,7 +263,7 @@ class DataProcessingPanel(QWidget):
 
     def add_dataframe(self, file_path, wrapper):
         self.dataframes[file_path] = wrapper
-        self.processors[file_path] = DataProcessor(wrapper, log_fn=self.log)
+        self.processors[file_path] = DataProcessor(wrapper, log_fn=None)
         self.file_selector.addItem(file_path)
 
     def remove_dataframe(self, file_path):
@@ -299,76 +302,97 @@ class DataProcessingPanel(QWidget):
                 logger.debug(message)
             case "INFO":
                 logger.info(message)
+            case "WARNING":
+                logger.warning(message)
             case "ERROR":
                 logger.error(message)
-        self.status_log.append(message)
+        if QThread.currentThread() is self.thread():
+            self.status_log.append(message)
+        else:
+            # schedule onto GUI thread
+            QTimer.singleShot(0, lambda m=message: self.status_log.append(m))
 
     def apply_operation(self):
-        def task():
-            file_path = self.file_selector.currentText()
-            columns = self.get_selected_columns()
-            operation = self.operation_selector.currentText()
-            param = self.operation_param.text()
-            success = False
+        # Read UI inputs in GUI thread
+        file_path = self.file_selector.currentText()
+        columns = self.get_selected_columns()
+        operation = self.operation_selector.currentText()
+        param = self.operation_param.text()
 
-            if not file_path or not operation:
-                self.log("Choose file and operation.", "INFO")
-                return
+        if not file_path or not operation:
+            self.log("Choose file and operation.", "INFO")
+            return
 
-            processor = self.processors.get(file_path)
+        drop_mode = None
+        if operation == "drop":
+            if self.drop_columns_radio.isChecked():
+                drop_mode = "columns"
+            elif self.drop_index_radio.isChecked():
+                drop_mode = "index"
+            elif self.drop_condition_radio.isChecked():
+                drop_mode = "condition"
+
+        processor = self.processors.get(file_path)
+
+        def task(signals=None):
+            needs_update_columns = False
+
             try:
-                match operation:
-                    case "normalize":
-                        processor.normalize_columns(columns)
-                        success = True
-                    case "scale":
-                        processor.scale_columns(columns, float(param))
-                        success = True
-                    case "offset":
-                        processor.offset(columns, float(param))
-                        success = True
-                    case "flip_sign":
-                        processor.flip_column_sign(columns)
-                        success = True
-                    case "rename":
-                        if len(columns) == 1:
-                            processor.rename_column(columns[0], str(param))
-                            QTimer.singleShot(200, self.update_columns)
-                            success = True
-                        else:
-                            self.log("You may rename only one column at a time", "ERROR")
-                    case "absolute":
-                        processor.absolute(columns)
-                        success = True
-                    case "sort":
-                        if len(columns) == 1:
-                            processor.sort_data(columns[0], ascending=True)
-                            success = True
-                        else:
-                            self.log("You may sort by only one column", "ERROR")
-                    case "drop":
-                        if self.drop_columns_radio.isChecked():
-                            processor.drop_data(columns=columns)
-                            QTimer.singleShot(200, self.update_columns)
-                            success = True
-                        elif self.drop_index_radio.isChecked():
-                            start_end = param.split(',')
-                            if len(start_end) == 2:
-                                start, end = int(start_end[0]), int(start_end[1])
-                                processor.drop_data(row_range=(start, end))
-                                success = True
-                        elif self.drop_condition_radio.isChecked():
-                            try:
-                                processor.drop_data(row_condition=lambda row: eval(param))
-                                success = True
-                            except Exception as e:
-                                self.log(f"Invalid lambda: {e}", "ERROR")
-                if success:
-                    self.log(f"Applied operation: {operation} on columns: {columns}", "INFO")
-            except Exception as e:
-                self.log(f"Error during operation: {e}", "ERROR")
+                if operation == "normalize":
+                    processor.normalize_columns(columns)
+                elif operation == "scale":
+                    processor.scale_columns(columns, float(param))
+                elif operation == "offset":
+                    processor.offset(columns, float(param))
+                elif operation == "flip_sign":
+                    processor.flip_column_sign(columns)
+                elif operation == "rename":
+                    if len(columns) != 1:
+                        return {"ok": False, "msg": "You may rename only one column at a time", "level": "ERROR"}
+                    processor.rename_column(columns[0], str(param))
+                    needs_update_columns = True
+                elif operation == "absolute":
+                    processor.absolute(columns)
+                elif operation == "sort":
+                    if len(columns) != 1:
+                        return {"ok": False, "msg": "You may sort by only one column", "level": "ERROR"}
+                    ascending = "False" not in param if param else True
+                    processor.sort_data(columns[0], ascending=ascending)
+                elif operation == "drop":
+                    if drop_mode == "columns":
+                        processor.drop_data(columns=columns)
+                        needs_update_columns = True
+                    elif drop_mode == "index":
+                        start_end = param.split(",")
+                        if len(start_end) != 2:
+                            return {"ok": False, "msg": "Drop index requires: start,end", "level": "ERROR"}
+                        start, end = int(start_end[0]), int(start_end[1])
+                        processor.drop_data(row_range=(start, end))
+                    elif drop_mode == "condition":
+                        # Warning: eval is unsafe for untrusted input, but kept as-is
+                        processor.drop_data(row_condition=lambda row: eval(param))
+                    else:
+                        return {"ok": False, "msg": "Choose drop mode.", "level": "ERROR"}
+                else:
+                    return {"ok": False, "msg": f"Unknown operation: {operation}", "level": "ERROR"}
 
-        show_processing_dialog(self, self.threadpool, Worker(task))
+                return {
+                    "ok": True,
+                    "msg": f"Applied operation: {operation} on columns: {columns}",
+                    "level": "INFO",
+                    "needs_update": needs_update_columns
+                }
+            except Exception as e:
+                return {"ok": False, "msg": f"Error during operation: {e}", "level": "ERROR", "needs_update": False}
+
+        def apply_ui(payload):
+            self.log(payload["msg"], payload["level"])
+            if payload.get("needs_update"):
+                self.update_columns()
+
+        worker = Worker(task)
+        worker.signals.result.connect(apply_ui)
+        show_processing_dialog(self, self.threadpool, worker)
 
     def add_filter(self):
         file_path = self.file_selector.currentText()
@@ -405,18 +429,25 @@ class DataProcessingPanel(QWidget):
             self.log(f"Error adding filter: {e}", "ERROR")
 
     def apply_filters(self):
-        try:
-            def task():
-                file_path = self.file_selector.currentText()
-                processor = self.processors.get(file_path)
-                processor.queue_filters()
-                self.queue_list.clear()
-                QTimer.singleShot(200, self.update_columns)
-                self.log("Applied all queued filters", "INFO")
+        file_path = self.file_selector.currentText()
+        if not file_path:
+            self.log("Choose file.", "INFO")
+            return
 
-            show_processing_dialog(self, self.threadpool, Worker(task))
-        except Exception as e:
-            self.log(f"Error during filter aplication:{e}", "ERROR")
+        processor = self.processors.get(file_path)
+
+        def task(signals=None):
+            processor.queue_filters()
+            return {"ok": True}
+
+        def apply_ui(_payload):
+            self.queue_list.clear()
+            self.update_columns()
+            self.log("Applied all queued filters", "INFO")
+
+        worker = Worker(task)
+        worker.signals.result.connect(apply_ui)
+        show_processing_dialog(self, self.threadpool, worker)
 
     @staticmethod
     def _parse_float(line_edit: QLineEdit):
@@ -457,22 +488,91 @@ class DataProcessingPanel(QWidget):
                 "plot_settings": {"title": f"FFT - {channel}"},
                 "databases": {file_path: {"channels": {channel: {"label": channel}}}}
             }
-            plotter = Plotter(cfg, {file_path: self.dataframes[file_path]})
-            plotter.plot_fft(
-                db_key=file_path,
-                channel=channel,
-                fs=fs,
-                nfft=nfft,
-                window=window,
-                detrend=detrend,
-                db_scale=db_scale,
-                max_freq=max_freq,
-                x_column=x_column,
-                title=f"FFT - {channel}",
-            )
-            self.log(f"Plotted FFT for {channel}", "INFO")
+
+            def task(signals=None):
+                """Worker: Prepare FFT data"""
+                try:
+                    if signals:
+                        signals.log.emit(f"Computing FFT for {channel}...", "INFO")
+
+                    # Compute the FFT data here (expensive operation)
+                    x = self.dataframes[file_path].get_dataframe()[
+                        x_column].compute().to_numpy() if x_column else None
+                    y = self.dataframes[file_path].get_dataframe()[channel].compute().to_numpy()
+
+                    # Use local variable for computed fs to avoid scope issues
+                    fs_actual = fs
+                    if fs_actual is None and x is not None:
+                        # Compute sampling frequency from data
+                        dx = np.diff(x)
+                        dx = dx[np.isfinite(dx)]
+                        med = float(np.median(dx)) if dx.size > 0 else 1.0
+                        fs_actual = 1.0 / (med if med > 0 else 1.0)
+
+                    if detrend:
+                        y = signal.detrend(y)
+
+                    if window:
+                        try:
+                            win = signal.get_window(window, len(y))
+                            y = y * win
+                        except:
+                            pass
+
+                    n = len(y) if nfft is None else int(nfft)
+                    y_fft = np.fft.rfft(y, n=n)
+                    f = np.fft.rfftfreq(n, d=1.0 / (fs_actual if fs_actual else 1.0))
+                    Pxx = (1 / ((fs_actual if fs_actual else 1.0) * n)) * np.abs(y_fft) ** 2
+
+                    if db_scale:
+                        Pxx = 10 * np.log10(Pxx + 1e-12)
+
+                    if max_freq:
+                        mask = f <= float(max_freq)
+                        f = f[mask]
+                        Pxx = Pxx[mask]
+
+                    return {"success": True, "f": f, "Pxx": Pxx, "channel": channel, "fs": fs_actual}
+                except Exception as e:
+                    if signals:
+                        signals.log.emit(f"Error computing FFT: {e}", "ERROR")
+                    return {"success": False, "error": str(e)}
+
+            def apply_ui(payload):
+                """Main thread: Render FFT plot (matplotlib must run on main thread)"""
+                if payload["success"]:
+                    try:
+                        f = payload["f"]
+                        Pxx = payload["Pxx"]
+
+                        fig, ax = plot.subplots(figsize=(10, 6))
+                        ax.plot(f, Pxx)
+                        ax.set_xlabel("Frequency [Hz]")
+                        ax.set_ylabel(
+                            r'Power spectral density [$\frac{dB}{Hz}$]' if db_scale else r'Power spectral density [$\frac{V^2}{Hz}$]')
+                        ax.grid(True)
+                        plot.title(f"FFT - {channel}")
+
+                        # Save the plot
+                        path = os.path.join("plots", f"FFT_{channel}.png")
+                        os.makedirs("plots", exist_ok=True)
+                        fig.savefig(path)
+
+                        # Show on main thread
+                        plot.show()
+
+                        self.log(f"Plotted FFT for {channel}", "INFO")
+                    except Exception as e:
+                        self.log(f"Error rendering FFT: {e}", "ERROR")
+                else:
+                    self.log(f"FFT computation failed: {payload.get('error')}", "ERROR")
+
+            worker = Worker(task)
+            worker.signals.result.connect(apply_ui)
+            show_processing_dialog(self, self.threadpool, worker)
+
         except Exception as e:
-            self.log(f"Error plotting FFT: {e}", "ERROR")
+            self.log(f"Error preparing FFT: {e}", "ERROR")
 
     def plot_spectrogram(self):
         file_path, cols = self._current_df_key_and_cols()
@@ -496,23 +596,57 @@ class DataProcessingPanel(QWidget):
                 "plot_settings": {"title": f"Spectrogram - {channel}"},
                 "databases": {file_path: {"channels": {channel: {"label": channel}}}}
             }
-            plotter = Plotter(cfg, {file_path: self.dataframes[file_path]})
-            plotter.plot_spectrogram(
-                db_key=file_path,
-                channel=channel,
-                fs=fs,
-                nperseg=nperseg,
-                noverlap=noverlap,
-                window=window,
-                mode=mode,
-                db_scale=db_scale,
-                cmap=cmap,
-                x_column=x_column,
-                title=f"Spectrogram - {channel}",
-            )
-            self.log(f"Plotted spectrogram for {channel}", "INFO")
+
+            def task(signals=None):
+                """Worker task: heavy spectrogram computation """
+                try:
+                    if signals:
+                        signals.log.emit(f"Computing spectrogram for {channel}...", "INFO")
+
+                    plotter = Plotter(cfg, {file_path: self.dataframes[file_path]})
+                    spec_data = plotter.compute_spectrogram(
+                        db_key=file_path,
+                        channel=channel,
+                        fs=fs,
+                        nperseg=nperseg,
+                        noverlap=noverlap,
+                        window=window,
+                        mode=mode,
+                        db_scale=db_scale,
+                        cmap=cmap,
+                        x_column=x_column,
+                        title=f"Spectrogram - {channel}",
+                    )
+
+                    if signals:
+                        signals.log.emit(f"Spectrogram computation complete for {channel}", "INFO")
+
+                    return {"success": True, "spec_data": spec_data}
+                except Exception as e:
+                    if signals:
+                        signals.log.emit(f"Error computing spectrogram: {e}", "ERROR")
+                    return {"success": False, "error": str(e)}
+
+            def apply_ui(payload):
+                """Main thread: Plot spectrogram"""
+                if payload["success"]:
+                    try:
+                        spec_data = payload["spec_data"]
+                        plotter = Plotter(cfg, {file_path: self.dataframes[file_path]})
+                        plotter.plot_spectrogram_data(spec_data)
+                        self.log(f"Plotted spectrogram for {channel}", "INFO")
+                    except Exception as e:
+                        self.log(f"Error plotting spectrogram: {e}", "ERROR")
+                else:
+                    self.log(f"Spectrogram generation failed: {payload.get('error', 'Unknown error')}", "ERROR")
+
+            worker = Worker(task)
+            worker.signals.log.connect(self.log)
+            worker.signals.result.connect(apply_ui)
+            show_processing_dialog(self, self.threadpool, worker)
+
         except Exception as e:
-            self.log(f"Error plotting spectrogram: {e}", "ERROR")
+            self.log(f"Error preparing spectrogram: {e}", "ERROR")
 
     def save_to_file(self):
         file_path = self.file_selector.currentText()

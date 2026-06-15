@@ -4,8 +4,7 @@ from PyQt6.QtWidgets import (
     QRadioButton, QButtonGroup, QLineEdit, QComboBox, QTimeEdit, QDateEdit
 )
 import os
-import json
-from PyQt6.QtCore import QThreadPool, QDate, QTime
+from PyQt6.QtCore import QThreadPool, QDate, QTime, QThread, QTimer
 from src.data_processing import DataFrameWrapper
 from src.data_acquisition import DATAParser, MongoDBDataRetriever
 from src.processing_utils import logger, Worker, show_processing_dialog
@@ -33,10 +32,6 @@ class UploadPanel(QWidget):
         self.bson_button = QPushButton("Convert BSON")
         self.bson_button.clicked.connect(self.load_bson)
         self.load_layout.addWidget(self.bson_button)
-
-        self.json_button = QPushButton("Convert JSON")
-        self.json_button.clicked.connect(self.load_json)
-        self.load_layout.addWidget(self.json_button)
 
         self.radio_group = QButtonGroup(self)
         self.interpolated_radio = QRadioButton("Interpolated")
@@ -148,10 +143,10 @@ class UploadPanel(QWidget):
         # Start
         start_layout = QVBoxLayout()
         start_layout.addWidget(QLabel("Start date / time"))
-        self.start_date_edit = QDateEdit(QDate(2001,9,11))
+        self.start_date_edit = QDateEdit(QDate(2001, 9, 11))
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.start_time_edit = QTimeEdit(QTime(16,20))
+        self.start_time_edit = QTimeEdit(QTime(16, 20))
         self.start_time_edit.setDisplayFormat("HH:mm")
         start_layout.addWidget(self.start_date_edit)
         start_layout.addWidget(self.start_time_edit)
@@ -159,10 +154,10 @@ class UploadPanel(QWidget):
         # Stop
         stop_layout = QVBoxLayout()
         stop_layout.addWidget(QLabel("End date / time"))
-        self.end_date_edit = QDateEdit(QDate(2001,9,11))
+        self.end_date_edit = QDateEdit(QDate(2001, 9, 11))
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.end_time_edit = QTimeEdit(QTime(21,37))
+        self.end_time_edit = QTimeEdit(QTime(21, 37))
         self.end_time_edit.setDisplayFormat("HH:mm")
         stop_layout.addWidget(self.end_date_edit)
         stop_layout.addWidget(self.end_time_edit)
@@ -233,33 +228,54 @@ class UploadPanel(QWidget):
                 logger.debug(message)
             case "INFO":
                 logger.info(message)
+            case "WARNING":
+                logger.warning(message)
             case "ERROR":
                 logger.error(message)
-        self.status_log.append(message)
+        if QThread.currentThread() is self.thread():
+            self.status_log.append(message)
+        else:
+            # schedule onto GUI thread
+            QTimer.singleShot(0, lambda m=message: self.status_log.append(m))
 
     def load_csv(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Choose CSV files", filter="CSV Files (*.csv)")
         if not files:
             return
-        for file_path in files:
-            try:
-                def task(path=file_path, signals=None):
-                    if path and path not in self.loaded_files:
-                        wrapper = DataFrameWrapper(path)
-                        self.loaded_files.append(path)
-                        self.file_list.addItem(path)
-                        if self.add_callback:
-                            self.add_callback(path, wrapper)
-                        if signals:
-                            signals.file_ready.emit(path)
-                        self.log(f"Loaded CSV file: {path}", "INFO")
 
-                worker = Worker(task)
-                worker.signals.file_ready.connect(self.add_file_widget)
-                worker.fn = lambda: task(signals=worker.signals)
-                show_processing_dialog(self, self.threadpool, worker)
-            except Exception as e:
-                self.log(f"Error while loading CSV:{file_path}: {e}", "ERROR")
+        for file_path in files:
+            if file_path in self.loaded_files:
+                continue
+
+            def task(path=file_path, signals=None):
+                # Background thread: NO Qt widgets
+                wrapper = DataFrameWrapper(path)
+                if signals:
+                    signals.log.emit(f"Loaded CSV file: {path}", "INFO")
+                return {"path": path, "wrapper": wrapper}
+
+            def apply_ui(payload):
+                # GUI thread: safe widget changes
+                path = payload["path"]
+                wrapper = payload["wrapper"]
+
+                if path in self.loaded_files:
+                    return
+
+                self.loaded_files.append(path)
+                self.file_list.addItem(path)
+
+                if self.add_callback:
+                    self.add_callback(path, wrapper)
+
+                # Optional: keep previous behavior
+                if self.add_file_widget:
+                    self.add_file_widget(path)
+
+            worker = Worker(task)
+            worker.signals.log.connect(self.log)
+            worker.signals.result.connect(apply_ui)
+            show_processing_dialog(self, self.threadpool, worker)
 
     def remove_dataframe(self, file_path):
         if file_path in self.loaded_files:
@@ -272,56 +288,46 @@ class UploadPanel(QWidget):
 
             self.log(f"File removed: {file_path}", "INFO")
 
-    def load_json(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Choose JSON files", filter="JSON Files (*.json)")
-        if not files:
-            return
-
-        def task():
-            for file_path in files:
-                base_path = os.path.splitext(file_path)[0]
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        parser = DATAParser(data, base_path, interpolated=self.interpolated)
-                        generated_paths = parser.json_to_csv()
-                        for path in generated_paths:
-                            if self.add_file_widget:
-                                self.add_file_widget(path)
-                        self.log(f"Converted JSON to CSVs: {base_path}", "INFO")
-                except Exception as e:
-                    self.log(f"JSON conversion error: {e}", "ERROR")
-
-        show_processing_dialog(self, self.threadpool, Worker(task))
-
     def retrieve_bson(self):
         ip = self.ip_address_box.text().strip()
         port_text = self.port_box.text().strip()
 
-        def task():
-            try:
-                port = int(port_text)
-                self.log(f"Connecting to MongoDB at {ip}:{port} ...", "INFO")
-                self.data_retriever.change_client(ip, port)
-                self.data_retriever.retrieve_databases()
-                dbs = list(self.data_retriever.get_databases().keys())
+        def task(signals=None):
+            port = int(port_text)
+            if signals:
+                signals.log.emit(f"Connecting to MongoDB at {ip}:{port} ...", "INFO")
 
-                self.retrieved_databases.clear()
-                self.retrieved_collections.clear()
-                for db in dbs:
-                    self.retrieved_databases.addItem(db)
+            self.data_retriever.change_client(ip, port)
+            self.data_retriever.retrieve_databases()
+            dbs = list(self.data_retriever.get_databases().keys())
 
-                if dbs:
-                    first_db = dbs[0]
-                    current_db = self.retrieved_databases.currentText() or first_db
-                    self.retrieved_collections.addItems(self.data_retriever.get_collections_in_database(current_db))
-                    self.log(f"Databases reloaded ({len(dbs)} found).", "INFO")
-                else:
-                    self.log("No databases found.", "INFO")
-            except Exception as e:
-                self.log(f"Failed to reload databases: {e}", "ERROR")
+            cols = []
+            if dbs:
+                current_db = dbs[0]
+                cols = self.data_retriever.get_collections_in_database(current_db)
 
-        show_processing_dialog(self, self.threadpool, Worker(task))
+            return {"dbs": dbs, "cols": cols}
+
+        def apply_ui(payload):
+            dbs = payload["dbs"]
+            cols = payload["cols"]
+
+            self.retrieved_databases.clear()
+            self.retrieved_collections.clear()
+
+            for db in dbs:
+                self.retrieved_databases.addItem(db)
+
+            if dbs:
+                self.retrieved_collections.addItems(cols)
+                self.log(f"Databases reloaded ({len(dbs)} found).", "INFO")
+            else:
+                self.log("No databases found.", "INFO")
+
+        worker = Worker(task)
+        worker.signals.log.connect(self.log)
+        worker.signals.result.connect(apply_ui)
+        show_processing_dialog(self, self.threadpool, worker)
 
     def reload_collections(self, db):
         self.retrieved_collections.clear()
@@ -368,15 +374,17 @@ class UploadPanel(QWidget):
             suffix = end_range if end_range is not None else "end"
             outfile = os.path.join("data", f"{database}_{collection}_range_{start_range}_{suffix}.bson")
 
-            def task():
-                try:
-                    self.log(f"Downloading {database}.{collection} "f"[{start_range}:{suffix}] → {outfile}", "INFO")
-                    self.data_retriever.retrieve_bson_range(database, collection, outfile, start_range, end_range)
-                    self.log(f"Saved BSON to {outfile}", "INFO")
-                except Exception as e:
-                    self.log(f"Error while downloading BSON: {e}", "ERROR")
+            def task(signals=None):
+                if signals:
+                    signals.log.emit(f"Downloading {database}.{collection} [{start_range}:{suffix}] → {outfile}",
+                                     "INFO")
+                self.data_retriever.retrieve_bson_range(database, collection, outfile, start_range, end_range)
+                if signals:
+                    signals.log.emit(f"Saved BSON to {outfile}", "INFO")
 
-            show_processing_dialog(self, self.threadpool, Worker(task))
+            worker = Worker(task)
+            worker.signals.log.connect(self.log)
+            show_processing_dialog(self, self.threadpool, worker)
             return
 
         try:
@@ -400,28 +408,52 @@ class UploadPanel(QWidget):
         end_str = end_dt.strftime("%Y%m%dT%H%M")
         outfile = os.path.join("data", f"{database}_{collection}_time_{start_str}_{end_str}.bson")
 
-        def task():
-            try:
-                self.log(f"Downloading {database}.{collection} "f"[{start_dt}_{end_dt}]_{outfile}", "INFO")
-                self.data_retriever.retrieve_bson_time_range(database, collection, outfile, start_dt, end_dt)
-                self.log(f"Saved BSON to {outfile}", "INFO")
-            except Exception as e:
-                self.log(f"Error while downloading BSON by time: {e}", "ERROR")
+        def task(signals=None):
+            if signals:
+                signals.log.emit(f"Downloading {database}.{collection} [{start_dt}_{end_dt}]_{outfile}", "INFO")
+            self.data_retriever.retrieve_bson_time_range(database, collection, outfile, start_dt, end_dt)
+            if signals:
+                signals.log.emit(f"Saved BSON to {outfile}", "INFO")
 
-        show_processing_dialog(self, self.threadpool, Worker(task))
+        worker = Worker(task)
+        worker.signals.log.connect(self.log)
+        show_processing_dialog(self, self.threadpool, worker)
 
     def load_bson(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Choose BSON files", filter="BSON Files (*.bson)")
         if not files:
             return
 
-        def task():
-            try:
-                DATAParser.bson_files_to_json(files)
-                for f in files:
-                    base, _ = os.path.splitext(f)
-                    self.log(f"Converted BSON to JSON: {base}.json", "INFO")
-            except Exception as e:
-                self.log(f"BSON conversion error: {e}", "ERROR")
+        def task(signals=None):
+            generated_all = []
+            for file_path in files:
+                base_path = os.path.splitext(file_path)[0]
+                try:
+                    # Use incremental processing to avoid loading entire BSON file into memory
+                    generated_paths = DATAParser.bson_file_to_csv_incremental(
+                        file_path,
+                        base_path,
+                        interpolated=self.interpolated
+                    )
+                    generated_all.extend(generated_paths)
+                    if signals:
+                        signals.log.emit(f"Converted BSON → CSV: {base_path}", "INFO")
+                except Exception as e:
+                    if signals:
+                        signals.log.emit(f"BSON conversion error ({file_path}): {e}", "ERROR")
+            return {"paths": generated_all}
 
-        show_processing_dialog(self, self.threadpool, Worker(task))
+        def apply_ui(payload):
+            for path in payload["paths"]:
+                wrapper = DataFrameWrapper(path)
+                self.loaded_files.append(path)
+                self.file_list.addItem(path)
+                if self.add_callback:
+                    self.add_callback(path, wrapper)
+                if self.add_file_widget:
+                    self.add_file_widget(path)
+
+        worker = Worker(task)
+        worker.signals.log.connect(self.log)
+        worker.signals.result.connect(apply_ui)
+        show_processing_dialog(self, self.threadpool, worker)
