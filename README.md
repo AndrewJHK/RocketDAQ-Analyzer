@@ -6,7 +6,7 @@
 > during rocket engine test campaigns and serves as a practical implementation of the methods discussed
 > in this work.
 
----
+
 
 RocketDAQAnalyzer is a Python desktop application for post-processing and analysis of telemetry data
 acquired from rocket engine static fire test campaigns. It ingests raw data exported from MongoDB
