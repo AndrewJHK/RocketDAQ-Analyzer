@@ -87,11 +87,6 @@ class DataFilter:
 
                 out_s = out_s.rename(out_col)
 
-                out_dd = dd.from_pandas(out_s, npartitions=df.npartitions)
-                out_dd = out_dd.repartition(divisions=df.divisions)
-
-                df[out_col] = out_dd
-
                 df[out_col] = dd.from_pandas(out_s, npartitions=df.npartitions)
 
                 current_s = out_s

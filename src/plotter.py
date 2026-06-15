@@ -1,20 +1,12 @@
 import matplotlib.pyplot as plot
-from matplotlib.animation import FuncAnimation
-from matplotlib import rc
 import os
 import matplotlib.ticker as ticker
 import numpy as np
 from scipy import signal
-from scipy.spatial.transform import Rotation
 import matplotlib as mpl
 
-mpl.rcParams["text.usetex"] = True
-mpl.rcParams["text.latex.preamble"] = r"""
-\usepackage[T1]{fontenc}
-\usepackage[utf8]{inputenc}
-\usepackage{lmodern}
-\usepackage{polski}
-"""
+mpl.use('QtAgg')
+
 mpl.rcParams.update({
     "axes.titlesize": 14,
     "axes.labelsize": 14,
@@ -22,9 +14,6 @@ mpl.rcParams.update({
     "ytick.labelsize": 14,
     "legend.fontsize": 13,
 })
-
-
-rc('text', usetex=True)
 
 
 class Plotter:
@@ -47,27 +36,20 @@ class Plotter:
             self.horizontal_lines = config_dict["plot_settings"].get("horizontal_lines", {})
             self.vertical_lines = config_dict["plot_settings"].get("vertical_lines", {})
         self.plots_folder_path = plots_folder_path
-        self.anim = None
         os.makedirs(self.plots_folder_path, exist_ok=True)
 
-    def plot(self):
-        fig, ax1 = plot.subplots(figsize=(10, 7))
-        ax2 = None
-
-        # Check if any channel is assigned to y2
-        has_y2 = any(
-            ch.get("y_axis") == "y2"
-            for db in self.config["databases"].values()
-            for ch in db["channels"].values()
-        )
-        if has_y2:
-            ax2 = ax1.twinx()
-
-        legend_handles = []
+    def prepare_plot_data(self):
+        """
+        Prepare plot data by computing all Dask operations.
+        This can run in a worker thread to avoid blocking the main thread.
+        Returns a dictionary with all pre-computed numpy arrays.
+        """
+        plot_data = {}
 
         for db_key, db_config in self.config["databases"].items():
             df_wrapper = self.dataframes[db_key]
             df = df_wrapper.get_dataframe()
+            plot_data[db_key] = {}
 
             for channel, ch_conf in db_config["channels"].items():
                 x_column = ch_conf.get("x_column", "index")
@@ -76,9 +58,12 @@ class Plotter:
                 color = ch_conf.get("color", None)
                 alpha = ch_conf.get("alpha", 1.0)
                 size = ch_conf.get("size", 1)
+
                 effective_offset = self.offset
                 if db_key == "db2" and self.convert_epoch != "none":
                     effective_offset += self.secondary_db_offset
+
+                # Compute x values
                 if x_column in df.columns:
                     match self.convert_epoch:
                         case "seconds":
@@ -89,24 +74,73 @@ class Plotter:
                             x_values = x_values - x_values.min() + effective_offset
                         case _:
                             x_values = df[x_column].compute() + effective_offset
-
                 else:
                     x_values = df.index.compute() + effective_offset
 
+                # Compute y values
                 if channel in df.columns:
                     y_values = df[channel].compute()
+                else:
+                    y_values = None
 
-                    if y_axis == "y1":
-                        if self.plot_type == "line":
-                            handle, = ax1.plot(x_values, y_values, label=label, color=color, alpha=alpha)
-                        else:
-                            handle = ax1.scatter(x_values, y_values, s=size, label=label, color=color, alpha=alpha)
-                    elif ax2:
-                        if self.plot_type == "line":
-                            handle, = ax2.plot(x_values, y_values, label=label, color=color, alpha=alpha)
-                        else:
-                            handle = ax2.scatter(x_values, y_values, s=size, label=label, color=color, alpha=alpha)
-                    legend_handles.append(handle)
+                # Store computed data
+                plot_data[db_key][channel] = {
+                    "x": x_values.to_numpy() if hasattr(x_values, 'to_numpy') else np.array(x_values),
+                    "y": y_values.to_numpy() if hasattr(y_values, 'to_numpy') and y_values is not None else (
+                        np.array(y_values) if y_values is not None else None),
+                    "label": label,
+                    "color": color,
+                    "alpha": alpha,
+                    "size": size,
+                    "y_axis": y_axis
+                }
+
+        return plot_data
+
+    def plot_from_data(self, plot_data):
+        """
+        Render plot from pre-computed data. This runs on the main thread.
+        Call prepare_plot_data() in a worker thread, then call this on the main thread.
+        """
+        fig, ax1 = plot.subplots(figsize=(10, 7))
+        ax2 = None
+
+        # Check if any channel is assigned to y2
+        has_y2 = any(
+            data.get("y_axis") == "y2"
+            for db_config in plot_data.values()
+            for data in db_config.values()
+        )
+        if has_y2:
+            ax2 = ax1.twinx()
+
+        legend_handles = []
+
+        # Plot all channels using pre-computed data
+        for db_key, channels_data in plot_data.items():
+            for channel, ch_data in channels_data.items():
+                x_values = ch_data["x"]
+                y_values = ch_data["y"]
+                y_axis = ch_data["y_axis"]
+                label = ch_data["label"]
+                color = ch_data["color"]
+                alpha = ch_data["alpha"]
+                size = ch_data["size"]
+
+                if y_values is None:
+                    continue
+
+                if y_axis == "y1":
+                    if self.plot_type == "line":
+                        handle, = ax1.plot(x_values, y_values, label=label, color=color, alpha=alpha)
+                    else:
+                        handle = ax1.scatter(x_values, y_values, s=size, label=label, color=color, alpha=alpha)
+                elif ax2:
+                    if self.plot_type == "line":
+                        handle, = ax2.plot(x_values, y_values, label=label, color=color, alpha=alpha)
+                    else:
+                        handle = ax2.scatter(x_values, y_values, s=size, label=label, color=color, alpha=alpha)
+                legend_handles.append(handle)
 
         # Axis labels
         ax1.set_xlabel(self.axis_labels.get("x", "X-Axis"))
@@ -159,135 +193,9 @@ class Plotter:
 
         plot.title(self.plot_name)
         self.save_plot(self.plot_name)
+
+        # This blocks on the main thread, allowing interactive use of the plot
         plot.show()
-
-    def flight_plot_orientation(self, save, orientation):
-
-        t = np.arange(0, len(orientation)) * 0.01
-
-        fig_gyro, ax_gyro = plot.subplots()
-        ax_gyro.plot(t, orientation[:, 0], label="x")
-        ax_gyro.plot(t, orientation[:, 1], label="y")
-        ax_gyro.plot(t, orientation[:, 2], label="z")
-        ax_gyro.set_title("Rocket Rotation")
-        ax_gyro.set_xlabel("Time [s]")
-        ax_gyro.set_ylabel("Angular velocity [rad/s]")
-        ax_gyro.grid()
-        ax_gyro.legend()
-
-        fig_orient = plot.figure()
-        ax_orient = fig_orient.add_subplot(projection="3d")
-
-        self.anim = FuncAnimation(
-            fig_orient,
-            func=self.animate_orientation,
-            fargs=(ax_orient, orientation),
-            frames=len(orientation),
-            interval=10,
-            repeat_delay=1000,
-        )
-
-        if save:
-            fig_gyro.savefig("plots/gyro.png")
-            self.anim.save("plots/orientation.mp4", writer="ffmpeg")
-
-        plot.show()
-
-    @staticmethod
-    def flight_plot_velocity(save, data):
-        t = np.arange(0, len(data[:, 0])) * 0.01
-
-        fig_alt, ax_alt = plot.subplots()
-        ax_alt.plot(t, data[:, 8])
-        ax_alt.set_xlabel("Time [s]")
-        ax_alt.set_ylabel("Altitude [m]")
-        ax_alt.set_title("Altitude")
-        ax_alt.grid()
-
-        fig_vel, ax_vel = plot.subplots()
-        ax_vel.plot(t, data[:, 5])
-        ax_vel.set_xlabel("Time [s]")
-        ax_vel.set_ylabel("Velocity [m/s]")
-        ax_vel.set_title("Velocity")
-        ax_vel.grid()
-
-        fig2 = plot.figure()
-        ax2 = fig2.add_subplot(projection="3d")
-        ax2.plot(data[:, 6], data[:, 7], data[:, 8])
-        ax2.plot(data[:, 6], data[:, 7], np.zeros_like(data[:, 8]), linestyle="--")
-        ax2.plot(np.zeros_like(data[:, 6]), data[:, 7], data[:, 8], linestyle="--")
-        ax2.plot(data[:, 6], np.zeros_like(data[:, 7]), data[:, 8], linestyle="--")
-        ax2.set_xlabel("X")
-        ax2.set_ylabel("Y")
-        ax2.set_zlabel("Z")
-        ax2.set_title("Position")
-        ax2.grid()
-
-        fig_acc, ax_acc = plot.subplots()
-        ax_acc.plot(t, data[:, 0], label="x acceleration")
-        ax_acc.plot(t, data[:, 1], label="y acceleration")
-        ax_acc.set_xlabel("Time [s]")
-        ax_acc.set_ylabel("Acceleration [m/s^2]")
-        ax_acc.grid()
-        ax_acc.legend()
-
-        if save:
-            fig_alt.savefig("plots/altitude.png")
-            fig_vel.savefig("plots/velocity.png")
-            fig2.savefig("plots/position.png")
-            fig_acc.savefig("plots/altitude.png")
-
-        plot.show()
-
-    @staticmethod
-    def animate_orientation(i, ax, quaternions):
-        ax.clear()
-        ax.quiver(0, 0, 0, 1, 0, 0, color="r", alpha=0.5, linestyle="--", normalize=True)
-        ax.quiver(0, 0, 0, 0, 1, 0, color="g", alpha=0.5, linestyle="--", normalize=True)
-        ax.quiver(0, 0, 0, 0, 0, 1, color="b", alpha=0.5, linestyle="--", normalize=True)
-        ax.set_xlim([-1, 1])
-        ax.set_ylim([-1, 1])
-        ax.set_zlim([-1, 1])
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
-        ax.set_title("Orientation")
-
-        rot = Rotation.from_quat(quaternions[i, :])
-        x_after_rot = rot.apply(np.array([1, 0, 0]))
-        y_after_rot = rot.apply(np.array([0, 1, 0]))
-        z_after_rot = rot.apply(np.array([0, 0, 1]))
-
-        ax.quiver(
-            0,
-            0,
-            0,
-            x_after_rot[0],
-            x_after_rot[1],
-            x_after_rot[2],
-            color="r",
-            normalize=True,
-        )
-        ax.quiver(
-            0,
-            0,
-            0,
-            y_after_rot[0],
-            y_after_rot[1],
-            y_after_rot[2],
-            color="g",
-            normalize=True,
-        )
-        ax.quiver(
-            0,
-            0,
-            0,
-            z_after_rot[0],
-            z_after_rot[1],
-            z_after_rot[2],
-            color="b",
-            normalize=True,
-        )
 
     @staticmethod
     def _compute_fs(x):
@@ -317,8 +225,9 @@ class Plotter:
             x = df[x_column].compute().to_numpy()
         return x, y
 
-    def plot_fft(self, db_key, channel, fs=None, nfft=None, window="hann", detrend=False, db_scale=True, max_freq=None,
-                 x_column=None, title=None):
+    def compute_fft(self, db_key, channel, fs=None, nfft=None, window="hann", detrend=False, db_scale=True, max_freq=None,
+                    x_column=None, title=None):
+        """Compute FFT data (can run in worker thread). Returns dict with FFT arrays."""
         x, y = self._series_from_cfg(db_key, channel, x_column)
 
         if fs is None:
@@ -346,42 +255,103 @@ class Plotter:
             f = f[mask]
             Pxx = Pxx[mask]
 
-        fig, ax = plot.subplots(figsize=(10, 6))
-        ax.plot(f, Pxx)
-        ax.set_xlabel("Frequency [Hz]")
-        ax.set_ylabel(
-            r'Power spectral density [$\frac{dB}{Hz}$]' if db_scale else r'Power spectral density [$\frac{V^2}{Hz}$]')
-        ax.grid(True)
-        plot.title(title or f"FFT: {channel}")
+        return {
+            "f": f,
+            "Pxx": Pxx,
+            "channel": channel,
+            "title": title,
+            "db_scale": db_scale
+        }
 
-        self.save_plot(title or f"FFT_{channel}")
-        plot.show()
-
-    def plot_spectrogram(self, db_key, channel, fs=None, nperseg=256, noverlap=None, window="hann", mode="psd",
-                         db_scale=True, cmap="viridis", x_column=None, title=None):
+    def compute_spectrogram(self, db_key, channel, fs=None, nperseg=256, noverlap=None, window="hann", mode="psd",
+                            db_scale=True, cmap="viridis", x_column=None, title=None):
+        """Compute spectrogram data (can run in worker thread). Returns dict with spectrogram arrays."""
         x, y = self._series_from_cfg(db_key, channel, x_column)
 
+        # Validate and clean data
+        if y is None or len(y) == 0:
+            raise ValueError(f"No data found for channel {channel}")
+
+        # Remove NaN/Inf values
+        valid_mask = np.isfinite(y)
+        if not np.any(valid_mask):
+            raise ValueError(f"All data values are NaN or Inf for channel {channel}")
+        y = y[valid_mask]
+        if x is not None:
+            x = x[valid_mask]
+
+        # Compute fs if not provided
         if fs is None:
             fs = self._compute_fs(x)
-        if fs is None:
+        if fs is None or fs <= 0:
             fs = 1.0
+
+        # Validate nperseg
+        nperseg = int(nperseg)
+        if nperseg <= 0:
+            nperseg = 256
+        if nperseg > len(y):
+            # If nperseg is too large, reduce it
+            nperseg = len(y) // 4 if len(y) > 4 else len(y)
+
+        # Validate and set noverlap
         if noverlap is None:
             noverlap = int(0.5 * nperseg)
+        else:
+            noverlap = int(noverlap)
 
-        f, t, Sxx = signal.spectrogram(
-            y,
-            fs=fs,
-            window=window,
-            nperseg=int(nperseg),
-            noverlap=int(noverlap),
-            mode=mode,
-            detrend=False,
-            scaling="density"
-        )
+        # noverlap must be strictly less than nperseg
+        if noverlap >= nperseg:
+            noverlap = int(0.5 * nperseg)
+        if noverlap < 0:
+            noverlap = 0
+
+        try:
+            f, t, Sxx = signal.spectrogram(
+                y,
+                fs=fs,
+                window=window,
+                nperseg=nperseg,
+                noverlap=noverlap,
+                mode=mode,
+                detrend=False,
+                scaling="density"
+            )
+        except Exception as e:
+            raise ValueError(f"Spectrogram computation failed: {e}")
+
+        # Ensure Sxx is valid before processing
+        if np.all(Sxx == 0):
+            raise ValueError("Spectrogram produced all-zero result. Check input data.")
 
         if db_scale:
-            Sxx = 10 * np.log10(Sxx + 1e-12)
+            # Handle potential negative or zero values before log
+            Sxx = np.maximum(Sxx, 1e-12)  # Clamp to avoid log errors
+            Sxx = 10 * np.log10(Sxx)
 
+        return {
+            "f": f,
+            "t": t,
+            "Sxx": Sxx,
+            "channel": channel,
+            "title": title,
+            "db_scale": db_scale,
+            "cmap": cmap,
+            "mode": mode
+        }
+
+    def plot_spectrogram_data(self, spec_data):
+        """Plot pre-computed spectrogram data (must run on main thread)."""
+        f = spec_data["f"]
+        t = spec_data["t"]
+        Sxx = spec_data["Sxx"]
+        channel = spec_data["channel"]
+        title = spec_data["title"]
+        db_scale = spec_data["db_scale"]
+        cmap = spec_data["cmap"]
+        mode = spec_data["mode"]
+
+        # Create figure
         fig, ax = plot.subplots(figsize=(10, 6))
         m = ax.pcolormesh(t, f, Sxx, shading="auto", cmap=cmap)
         ax.set_ylabel("Frequency [Hz]")
@@ -389,7 +359,10 @@ class Plotter:
         cbar = plot.colorbar(m, ax=ax)
         cbar.set_label("Power [dB]" if db_scale else ("PSD" if mode == "psd" else "Magnitude"))
         ax.set_title(title or f"Spectrogram: {channel}")
-        ax.set_ylim(0, f.max())
+
+        # Only set ylim if f has valid values
+        if len(f) > 0 and f.max() > 0:
+            ax.set_ylim(0, f.max())
 
         self.save_plot(title or f"Spectrogram_{channel}")
         plot.show()

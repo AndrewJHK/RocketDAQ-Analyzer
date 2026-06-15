@@ -1,14 +1,10 @@
-RocketDAQ Analyzer
----
-The developed application constitutes an integral part of the engineering thesis entitled
-“Digital filtering of data from pressure sensors in the rocket engine system.” </br>
-The software was created to support the analysis and post-processing of experimental data 
-acquired during rocket engine test campaigns and serves as a practical implementation of the methods discussed in this work.
----
+# postprocessing-app
+
+postprocessing-app is a Python-based postprocessing application aimed at the problem of readability of data acquired
+during tests
 
 ## Features
-- BSON data retrieval
-- BSON to JSON conversion
+
 - JSON to csv conversion
 - Data cleanup and analysis
 - Plotting of the csv data and saving them as separate files
@@ -36,8 +32,8 @@ Ensure you have the following installed:
    Clone the repository to your local machine:
 
    ```bash
-   git clone https://github.com/AndrewJHK/RocketDAQ-Analyzer
-   cd RocketDAQ-Analyzer
+   git clone https://github.com/AndrewJHK/postprocessing-app
+   cd postprocessing-app
    ```
 
 2. **Create a Virtual Environment**
@@ -78,24 +74,18 @@ Ensure you have the following installed:
 
 App consists of 4 main panels
 
-- Data acquisition
-- Flight plot
+- Load Data
+- Flight Plot
 - Data processing
 - Plotting
 
 ---
 
-### Data acquisition
+### Load Data
 
-Here you can retrieve data straight from the MongoDB database as BSON types based on two possible indexes:
-
-- **Document number** - Selecting the appropriate button and filling out the start and stop indexes will result in retrieval
-    of that range of documents - rows.
-- **Date** - Selecting the time related button and filling out the start and end date will result in retrieval
-    of all the documents - rows - that have been saved in provided time frame.
-
-On top of that this panel supports the loading the csv data, conversion of json files to csv and conversion of bson files to json. Loaded files will show up on the left in the list with an
-adjacent delete button.</br>
+Here you can load the csv data and convert json files to csv. Loaded files will show up on the left in the list with an
+adjacent delete
+button.</br>
 JSON loading has two radio buttons:
 
 - **Interpolate** - Every column will have a value for every timestamp that will appear.
@@ -104,7 +94,6 @@ JSON loading has two radio buttons:
 - **Fill None** - When there is no value for specific column in a specific timestamp it will be assigned 'None'.
 
 After conversion of JSON file you still need to load them as csv files.
-
 
 ---
 
